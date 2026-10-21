@@ -37,7 +37,7 @@ jobs:
           git clone --depth=500 https://gitlab.freedesktop.org/mesa/mesa.git
           cd mesa
           echo "Current Mesa HEAD: $(git log --oneline -1)"
-          # Mesa 27.0+ içindeki "Building Mesa with LTO is not supported" engelini kaldırıyoruz:
+          # Mesa içindeki "Building Mesa with LTO is not supported" engelini kaldırıyoruz:
           sed -i "s/error('Building Mesa with LTO/warning('Building Mesa with LTO/g" meson.build
 
       # ═══════════════════════════════════════════
@@ -61,7 +61,7 @@ jobs:
           WRAPEOF
 
       # ═══════════════════════════════════════════
-      # 4. YAMALAR (İSTEĞE BAĞLI CHERRY-PICK ADIMI)
+      # 4. YAMALAR
       # ═══════════════════════════════════════════
       - name: Apply patches
         run: |
@@ -70,7 +70,6 @@ jobs:
 
       # ═══════════════════════════════════════════
       # 5. CROSS-FILE (CORTEX-X4 & ARMV9.2-A OPTİMİZASYONU)
-      # pkg-config = '/bin/false' ile Ubuntu x86_64 zstd.h karışıklığı engellendi
       # ═══════════════════════════════════════════
       - name: Generate Meson Cross File
         run: |
@@ -100,14 +99,13 @@ jobs:
           EOF
 
       # ═══════════════════════════════════════════
-      # 6. MESON SETUP (THINLTO AKTİF & HOST KÜTÜPHANELERİ KAPALI)
+      # 6. MESON SETUP (THINLTO AKTİF & BOOLEAN DÜZELTİLDİ)
       # ═══════════════════════════════════════════
       - name: Meson Setup
         run: |
           cd mesa
           meson setup build \
             --cross-file ../cross-file.txt \
-            --wrap-mode=nofallback \
             --force-fallback-for=libdrm \
             -Dlibdrm:default_library=static \
             -Dlibdrm:tests=false \
@@ -129,7 +127,7 @@ jobs:
             -Dzlib=enabled \
             -Dxmlconfig=disabled \
             -Dllvm=disabled \
-            -Dspirv-to-dxil=disabled \
+            -Dspirv-to-dxil=false \
             -Dandroid-libbacktrace=disabled \
             -Dvalgrind=disabled \
             -Dvideo-codecs=
