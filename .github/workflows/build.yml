@@ -1,0 +1,160 @@
+name: Build Turnip A750
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'  # Her Pazartesi 06:00 UTC otomatik günceller
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # ═══════════════════════════════════════════
+      # 1. TEMİZ DERLEME BAĞIMLILIKLARI
+      # ═══════════════════════════════════════════
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson ninja-build \
+            python3-mako python3-ply python3-yaml \
+            bison flex \
+            glslang-tools spirv-tools zip
+
+      - name: Setup Android NDK r27
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27
+
+      # ═══════════════════════════════════════════
+      # 2. RESMİ MESA KAYNAK KODU (Virüssüz / Doğrudan Resmi GitLab)
+      # ═══════════════════════════════════════════
+      - name: Clone Official Mesa (Recent 500 Commits)
+        run: |
+          git clone --depth=500 https://gitlab.freedesktop.org/mesa/mesa.git
+          cd mesa
+          echo "Current Mesa HEAD: $(git log --oneline -1)"
+
+      # ═══════════════════════════════════════════
+      # 3. LIBDRM SUBPROJECT WRAP (Android Derleme Bağımlılığı)
+      # ═══════════════════════════════════════════
+      - name: Setup libdrm subproject wrap
+        run: |
+          mkdir -p mesa/subprojects
+          cat > mesa/subprojects/libdrm.wrap << 'WRAPEOF'
+          [wrap-git]
+          directory = libdrm
+          url = https://gitlab.freedesktop.org/mesa/drm.git
+          revision = main
+          depth = 1
+
+          [provide]
+          libdrm = ext_libdrm
+          WRAPEOF
+
+      # ═══════════════════════════════════════════
+      # 4. CROSS-FILE (Snapdragon 8 Gen 3 / Adreno 750 Özel)
+      # ═══════════════════════════════════════════
+      - name: Generate Meson Cross File
+        run: |
+          NDK="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64"
+          cat > cross-file.txt << EOF
+          [binaries]
+          c = '${NDK}/bin/aarch64-linux-android33-clang'
+          cpp = '${NDK}/bin/aarch64-linux-android33-clang++'
+          ar = '${NDK}/bin/llvm-ar'
+          strip = '${NDK}/bin/llvm-strip'
+          c_ld = 'lld'
+          cpp_ld = 'lld'
+          pkgconfig = 'pkg-config'
+
+          [host_machine]
+          system = 'linux'
+          cpu_family = 'aarch64'
+          cpu = 'armv8'
+          endian = 'little'
+
+          [built-in options]
+          c_args = ['-march=armv9.2-a', '-mtune=cortex-x4', '-O3', '-fomit-frame-pointer', '-fno-math-errno', '-ffunction-sections', '-fdata-sections', '-D__ANDROID__', '-Wno-error']
+          cpp_args = ['-march=armv9.2-a', '-mtune=cortex-x4', '-O3', '-fomit-frame-pointer', '-fno-math-errno', '-ffunction-sections', '-fdata-sections', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-D__ANDROID__', '-Wno-error']
+          c_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections', '-static-libstdc++']
+          cpp_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections', '-static-libstdc++']
+          EOF
+
+      # ═══════════════════════════════════════════
+      # 5. MESON YAPILANDIRMASI (Turnip + KGSL + ThinLTO)
+      # ═══════════════════════════════════════════
+      - name: Meson Setup
+        run: |
+          cd mesa
+          meson setup build \
+            --cross-file ../cross-file.txt \
+            --wrap-mode=default \
+            -Dbuildtype=release \
+            -Db_ndebug=true \
+            -Db_lto=true \
+            -Db_lto_mode=thin \
+            -Dstrip=true \
+            -Dplatforms=android \
+            -Dandroid-stub=true \
+            -Dplatform-sdk-version=33 \
+            -Dvulkan-drivers=freedreno \
+            -Dvulkan-beta=true \
+            -Dfreedreno-kmds=kgsl \
+            -Dgallium-drivers= \
+            -Degl=disabled \
+            -Dspirv-to-dxil=disabled \
+            -Dvalgrind=disabled
+
+      # ═══════════════════════════════════════════
+      # 6. SÜRÜCÜYÜ DERLE
+      # ═══════════════════════════════════════════
+      - name: Build with Ninja
+        run: ninja -C mesa/build
+
+      # ═══════════════════════════════════════════
+      # 7. ADRENOTOOLS FORMATINDA PAKETLEME (bylaws standardı)
+      # ═══════════════════════════════════════════
+      - name: Package Driver
+        run: |
+          NDK="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64"
+          mkdir -p package
+
+          # Kütüphaneyi kopyala ve gereksiz sembolleri kırp (llvm-strip)
+          cp mesa/build/src/freedreno/vulkan/libvulkan_freedreno.so package/
+          ${NDK}/bin/llvm-strip --strip-unneeded package/libvulkan_freedreno.so
+
+          # Zorunlu meta.json oluştur
+          MESA_VER=$(cat mesa/VERSION 2>/dev/null || echo "git")
+          cat > package/meta.json << METAEOF
+          {
+            "schemaVersion": 1,
+            "name": "Turnip A750 Custom",
+            "description": "Snapdragon 8 Gen 3 (Adreno 750) — Cortex-X4 Tuned + ThinLTO",
+            "author": "Forsker-r",
+            "packageVersion": "1",
+            "vendor": "Mesa/Freedreno",
+            "driverVersion": "Vulkan 1.3 (Mesa ${MESA_VER})",
+            "minApi": 33,
+            "libraryName": "libvulkan_freedreno.so"
+          }
+          METAEOF
+
+          # AdrenoTools uyumlu ZIP oluştur
+          cd package
+          ZIP_NAME="Turnip-A750-$(date +%Y%m%d).zip"
+          zip -9 "${ZIP_NAME}" libvulkan_freedreno.so meta.json
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          ls -lh
+
+      # ═══════════════════════════════════════════
+      # 8. ÇIKTIYI İNDİRİLEBİLİR YAP (Artifacts)
+      # ═══════════════════════════════════════════
+      - name: Upload Driver ZIP Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Turnip-A750-Driver
+          path: package/*.zip
