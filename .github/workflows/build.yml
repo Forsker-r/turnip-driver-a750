@@ -56,7 +56,7 @@ jobs:
           WRAPEOF
 
       # ═══════════════════════════════════════════
-      # 4. CROSS-FILE (CORTEX-X4 & ARMV9.2-A ÖZEL BAYRAKLAR)
+      # 4. CROSS-FILE (CORTEX-X4 & ARMV9.2-A DONANIM OPTİMİZASYONU)
       # ═══════════════════════════════════════════
       - name: Generate Meson Cross File
         run: |
@@ -85,7 +85,7 @@ jobs:
           EOF
 
       # ═══════════════════════════════════════════
-      # 5. MESON SETUP (THINLTO & KGSL & VULKAN 1.3)
+      # 5. MESON SETUP (MESA STANDARTLARINA TAM UYUMLU)
       # ═══════════════════════════════════════════
       - name: Meson Setup
         run: |
@@ -95,17 +95,17 @@ jobs:
             --wrap-mode=default \
             -Dbuildtype=release \
             -Db_ndebug=true \
-            -Db_lto=true \
-            -Db_lto_mode=thin \
             -Dstrip=true \
             -Dplatforms=android \
             -Dandroid-stub=true \
             -Dplatform-sdk-version=33 \
+            -Dvideo-codecs= \
             -Dvulkan-drivers=freedreno \
             -Dvulkan-beta=true \
             -Dfreedreno-kmds=kgsl \
             -Dgallium-drivers= \
             -Degl=disabled \
+            -Dandroid-libbacktrace=disabled \
             -Dvalgrind=disabled
 
       # ═══════════════════════════════════════════
@@ -130,7 +130,7 @@ jobs:
           {
             "schemaVersion": 1,
             "name": "Turnip A750 Custom",
-            "description": "Snapdragon 8 Gen 3 (Adreno 750) — Cortex-X4 Tuned + ThinLTO",
+            "description": "Snapdragon 8 Gen 3 (Adreno 750) — Cortex-X4 Tuned",
             "author": "Forsker-r",
             "packageVersion": "1",
             "vendor": "Mesa/Freedreno",
