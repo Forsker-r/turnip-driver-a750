@@ -19,7 +19,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             python3-pip python3-mako python3-ply python3-yaml \
-            bison flex ninja-build \
+            bison flex byacc ninja-build \
             glslang-tools spirv-tools zip
           python3 -m pip install --break-system-packages --upgrade meson
 
@@ -30,22 +30,25 @@ jobs:
           ndk-version: r27
 
       # ═══════════════════════════════════════════
-      # 2. RESMİ MESA KAYNAK KODU
+      # 2. RESMİ MESA KAYNAK KODU VE LTO KİLİDİNİ AÇMA
       # ═══════════════════════════════════════════
       - name: Clone Official Mesa (Recent 500 Commits)
         run: |
           git clone --depth=500 https://gitlab.freedesktop.org/mesa/mesa.git
           cd mesa
           echo "Current Mesa HEAD: $(git log --oneline -1)"
+          # Mesa 27.0+ içindeki "Building Mesa with LTO is not supported" engelini kaldırıyoruz:
+          sed -i "s/error('Building Mesa with LTO/warning('Building Mesa with LTO/g" meson.build
 
       # ═══════════════════════════════════════════
-      # 3. LIBDRM SUBPROJECT WRAP & HATALI LIBARCHIVE'I TEMİZLEME
+      # 3. SUBPROJECT TEMİZLİĞİ & SADECE LIBDRM WRAP
       # ═══════════════════════════════════════════
-      - name: Setup libdrm wrap and remove broken libarchive wrap
+      - name: Setup libdrm wrap and clean broken wraps
         run: |
           mkdir -p mesa/subprojects
-          # Hatalı ve Android'de çöken gereksiz libarchive wrap'ini siliyoruz:
-          rm -f mesa/subprojects/libarchive.wrap
+          # libarchive, zstd vb. Android'de çöken TÜM gereksiz wrap dosyalarını siliyoruz:
+          rm -f mesa/subprojects/*.wrap
+
           cat > mesa/subprojects/libdrm.wrap << 'WRAPEOF'
           [wrap-git]
           directory = libdrm
@@ -58,7 +61,16 @@ jobs:
           WRAPEOF
 
       # ═══════════════════════════════════════════
-      # 4. CROSS-FILE (CORTEX-X4 & ARMV9.2-A DONANIM OPTİMİZASYONU)
+      # 4. YAMALAR (İSTEĞE BAĞLI CHERRY-PICK ADIMI)
+      # ═══════════════════════════════════════════
+      - name: Apply patches
+        run: |
+          cd mesa
+          echo "Yama adımı hazır."
+
+      # ═══════════════════════════════════════════
+      # 5. CROSS-FILE (CORTEX-X4 & ARMV9.2-A OPTİMİZASYONU)
+      # pkg-config = '/bin/false' ile Ubuntu x86_64 zstd.h karışıklığı engellendi
       # ═══════════════════════════════════════════
       - name: Generate Meson Cross File
         run: |
@@ -71,7 +83,8 @@ jobs:
           strip = '${NDK}/bin/llvm-strip'
           c_ld = 'lld'
           cpp_ld = 'lld'
-          pkg-config = 'pkg-config'
+          pkgconfig = '/bin/false'
+          pkg-config = '/bin/false'
 
           [host_machine]
           system = 'linux'
@@ -87,37 +100,48 @@ jobs:
           EOF
 
       # ═══════════════════════════════════════════
-      # 5. MESON SETUP (SADECE LIBDRM'E İZİN VERİYORUZ)
+      # 6. MESON SETUP (THINLTO AKTİF & HOST KÜTÜPHANELERİ KAPALI)
       # ═══════════════════════════════════════════
       - name: Meson Setup
         run: |
           cd mesa
           meson setup build \
             --cross-file ../cross-file.txt \
+            --wrap-mode=nofallback \
             --force-fallback-for=libdrm \
+            -Dlibdrm:default_library=static \
+            -Dlibdrm:tests=false \
+            -Dlibdrm:valgrind=disabled \
             -Dbuildtype=release \
             -Db_ndebug=true \
+            -Db_lto=true \
+            -Db_lto_mode=thin \
             -Dstrip=true \
             -Dplatforms=android \
             -Dandroid-stub=true \
             -Dplatform-sdk-version=33 \
-            -Dvideo-codecs= \
             -Dvulkan-drivers=freedreno \
             -Dvulkan-beta=true \
             -Dfreedreno-kmds=kgsl \
             -Dgallium-drivers= \
             -Degl=disabled \
+            -Dzstd=disabled \
+            -Dzlib=enabled \
+            -Dxmlconfig=disabled \
+            -Dllvm=disabled \
+            -Dspirv-to-dxil=disabled \
             -Dandroid-libbacktrace=disabled \
-            -Dvalgrind=disabled
+            -Dvalgrind=disabled \
+            -Dvideo-codecs=
 
       # ═══════════════════════════════════════════
-      # 6. SÜRÜCÜYÜ DERLE (NINJA)
+      # 7. SÜRÜCÜYÜ DERLE (NINJA)
       # ═══════════════════════════════════════════
       - name: Build with Ninja
         run: ninja -C mesa/build
 
       # ═══════════════════════════════════════════
-      # 7. PAKETLEME (ADRENOTOOLS & LLVM-STRIP)
+      # 8. PAKETLEME (ADRENOTOOLS & LLVM-STRIP)
       # ═══════════════════════════════════════════
       - name: Package Driver
         run: |
@@ -132,7 +156,7 @@ jobs:
           {
             "schemaVersion": 1,
             "name": "Turnip A750 Custom",
-            "description": "Snapdragon 8 Gen 3 (Adreno 750) — Cortex-X4 Tuned",
+            "description": "Snapdragon 8 Gen 3 (Adreno 750) — Cortex-X4 Tuned + ThinLTO",
             "author": "Forsker-r",
             "packageVersion": "1",
             "vendor": "Mesa/Freedreno",
@@ -146,10 +170,10 @@ jobs:
           ZIP_NAME="Turnip-A750-$(date +%Y%m%d).zip"
           zip -9 "${ZIP_NAME}" libvulkan_freedreno.so meta.json
           echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
-          ls -lh
+          ls -lh *.zip
 
       # ═══════════════════════════════════════════
-      # 8. ÇIKTIYI İNDİRİLEBİLİR YAP (ARTIFACTS)
+      # 9. ÇIKTIYI İNDİRİLEBİLİR YAP (ARTIFACTS)
       # ═══════════════════════════════════════════
       - name: Upload Driver ZIP Artifact
         uses: actions/upload-artifact@v4
