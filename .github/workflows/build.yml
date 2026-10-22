@@ -1,194 +1,508 @@
-name: Build Turnip A750 Extreme (SD 8 Gen 3)
+# =============================================================================
+# Turnip (Mesa freedreno Vulkan) -- Snapdragon 8 Gen 3 / Adreno 750 (a7xx_gen3)
+# Bu dosya depoda .github/workflows/build.yml olarak durmalidir.
+#
+# Kaynak politikasi:
+#   - Mesa kaynagi YALNIZCA https://gitlab.freedesktop.org/mesa/mesa.git
+#   - Android NDK YALNIZCA dl.google.com (SHA-1, Google'in resmi manifestinden dogrulanir)
+#   - Baska bir sofor arsivi / mirror / fork / yama deposu KULLANILMAZ
+# =============================================================================
+name: Build Turnip (Adreno 750 / SM8650)
+
 on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
   workflow_dispatch:
+    inputs:
+      source:
+        description: 'Mesa kaynagi: stable (son resmi stable tag), main (resmi main HEAD), tag (asagidaki mesa_tag)'
+        type: choice
+        options: [stable, main, tag]
+        default: stable
+      mesa_tag:
+        description: 'source=tag ise resmi Mesa tag adi (ornek: mesa-26.2.1)'
+        type: string
+        required: false
+      ndk_version:
+        description: 'Android NDK surumu (dokumana gore r26d)'
+        type: string
+        default: r26d
+      ndk_api_level:
+        description: 'Clang hedef triple API seviyesi (dokuman: aarch64-linux-android34-clang)'
+        type: string
+        default: '34'
+      platform_sdk_version:
+        description: 'Mesa -Dplatform-sdk-version (dokuman: 36)'
+        type: string
+        default: '36'
+      enable_lto:
+        description: 'Varsayim/deneysel: ThinLTO (dokumanlarda LTO ayari YOK; varsayilan kapali)'
+        type: boolean
+        default: false
+      cpu_tune:
+        description: 'Varsayim/deneysel: -mtune degeri (ornek: cortex-a720). Bos = kapali. ISA degistirmez.'
+        type: string
+        required: false
+      publish_release:
+        description: 'GitHub Release olustur / guncelle'
+        type: boolean
+        default: false
   schedule:
-    - cron: '0 6 * * 1'
+    # Haftalik: yeni resmi stable tag cikmissa (ve bu tag icin Release yoksa) derler.
+    - cron: '17 5 * * 1'
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: turnip-a750-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  MESA_REPO_URL: https://gitlab.freedesktop.org/mesa/mesa.git
+  NDK_DL_BASE: https://dl.google.com/android/repository
+  NDK_MANIFEST_URL: https://dl.google.com/android/repository/repository2-3.xml
 
 jobs:
-  build:
+  # ---------------------------------------------------------------------------
+  # 1) Kaynak surumunu ve commit'i resmi Mesa GitLab'dan tespit et
+  # ---------------------------------------------------------------------------
+  resolve:
+    name: Resolve official Mesa source
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      ref: ${{ steps.pick.outputs.ref }}
+      commit: ${{ steps.pick.outputs.commit }}
+      label: ${{ steps.pick.outputs.label }}
+      release_tag: ${{ steps.pick.outputs.release_tag }}
+      is_main: ${{ steps.pick.outputs.is_main }}
+      skip: ${{ steps.pick.outputs.skip }}
+      do_release: ${{ steps.pick.outputs.do_release }}
     steps:
-      # ═══════════════════════════════════════════
-      # 1. GÜNCEL VE RESMİ DERLEME ARAÇLARI
-      # ═══════════════════════════════════════════
-      - name: Install build dependencies
+      - name: Pick Mesa ref and commit (gitlab.freedesktop.org/mesa/mesa only)
+        id: pick
+        env:
+          INPUT_SOURCE: ${{ inputs.source }}
+          INPUT_TAG: ${{ inputs.mesa_tag }}
+          INPUT_PUBLISH: ${{ inputs.publish_release }}
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            python3-pip python3-mako python3-ply python3-yaml \
-            bison flex byacc ninja-build patchelf \
-            glslang-tools spirv-tools zip
-          python3 -m pip install --break-system-packages --upgrade meson
+          set -euo pipefail
+          SOURCE="${INPUT_SOURCE:-stable}"
+          [ "$EVENT" = "schedule" ] && SOURCE="stable"
+          IS_MAIN=false
 
-      - name: Setup Android NDK r27
-        id: ndk
-        uses: nttld/setup-ndk@v1
+          case "$SOURCE" in
+            stable)
+              ALL_TAGS="$(git ls-remote --tags --refs "$MESA_REPO_URL" 'refs/tags/mesa-*')"
+              if [ -z "$ALL_TAGS" ]; then
+                echo "::error title=Mesa tag listesi bos::git ls-remote bos dondu (ag hatasi veya GitLab bot korumasi olabilir)."
+                exit 1
+              fi
+              TAG="$(printf '%s\n' "$ALL_TAGS" | awk '{print $2}' | sed 's#refs/tags/##' \
+                     | grep -E '^mesa-[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+              [ -n "$TAG" ] || { echo "::error::Stable tag bulunamadi"; exit 1; }
+              REF="refs/tags/$TAG"
+              ;;
+            tag)
+              TAG="${INPUT_TAG:-}"
+              if ! printf '%s' "$TAG" | grep -Eq '^mesa-[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$'; then
+                echo "::error title=Gecersiz mesa_tag::Beklenen bicim: mesa-X.Y.Z (veya -rcN). Girilen: '$TAG'"
+                exit 1
+              fi
+              REF="refs/tags/$TAG"
+              ;;
+            main)
+              TAG=""
+              REF="refs/heads/main"
+              IS_MAIN=true
+              ;;
+            *)
+              echo "::error::Bilinmeyen source: $SOURCE"; exit 1 ;;
+          esac
+
+          if [ "$IS_MAIN" = "true" ]; then
+            COMMIT="$(git ls-remote "$MESA_REPO_URL" "$REF" | awk 'NR==1{print $1}')"
+          else
+            # Annotated tag ise peeled (^{}) commit, degilse dogrudan commit
+            LS="$(git ls-remote "$MESA_REPO_URL" "$REF" "$REF^{}")"
+            COMMIT="$(printf '%s\n' "$LS" | awk '/\^\{\}$/{print $1}' | head -n1)"
+            [ -n "$COMMIT" ] || COMMIT="$(printf '%s\n' "$LS" | awk 'NR==1{print $1}')"
+          fi
+          printf '%s' "$COMMIT" | grep -Eq '^[0-9a-f]{40}$' \
+            || { echo "::error::Gecerli commit hash alinamadi ('$COMMIT')"; exit 1; }
+
+          SHORT="${COMMIT:0:12}"
+          if [ "$IS_MAIN" = "true" ]; then
+            LABEL="main-$SHORT"
+            RELEASE_TAG="turnip-a750-main-$SHORT"
+          else
+            LABEL="$TAG"
+            RELEASE_TAG="turnip-a750-$TAG"
+          fi
+
+          DO_RELEASE=false
+          if [ "$EVENT" = "schedule" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "${INPUT_PUBLISH:-false}" = "true" ]; }; then
+            DO_RELEASE=true
+          fi
+
+          # Zamanlanmis kosuda ayni tag icin Release zaten varsa bos yere derleme
+          SKIP=false
+          if [ "$EVENT" = "schedule" ] && gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            SKIP=true
+            echo "::notice title=Atlandi::$RELEASE_TAG icin Release zaten var."
+          fi
+
+          {
+            echo "ref=$REF"
+            echo "commit=$COMMIT"
+            echo "label=$LABEL"
+            echo "release_tag=$RELEASE_TAG"
+            echo "is_main=$IS_MAIN"
+            echo "skip=$SKIP"
+            echo "do_release=$DO_RELEASE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Secilen kaynak: $REF @ $COMMIT (release tag: $RELEASE_TAG, skip=$SKIP)"
+
+  # ---------------------------------------------------------------------------
+  # 2) Derle ve paketle
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build libvulkan_freedreno.so (aarch64 / Android / KGSL)
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write   # yalnizca Release adimi icin
+    env:
+      MESA_REF: ${{ needs.resolve.outputs.ref }}
+      MESA_COMMIT: ${{ needs.resolve.outputs.commit }}
+      MESA_LABEL: ${{ needs.resolve.outputs.label }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+      IS_MAIN: ${{ needs.resolve.outputs.is_main }}
+      DO_RELEASE: ${{ needs.resolve.outputs.do_release }}
+      NDK_VERSION: ${{ inputs.ndk_version || 'r26d' }}
+      ANDROID_API: ${{ inputs.ndk_api_level || '34' }}
+      PLATFORM_SDK: ${{ inputs.platform_sdk_version || '36' }}
+      ENABLE_LTO: ${{ inputs.enable_lto && 'true' || 'false' }}
+      CPU_TUNE: ${{ inputs.cpu_tune }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 1G
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Install host build dependencies (Ubuntu archive)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            ccache glslang-tools spirv-tools bison flex pkg-config \
+            python3-venv python3-pip unzip zip jq binutils git curl ca-certificates
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet --upgrade pip
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet meson ninja mako pyyaml packaging
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Show host tool versions
+        run: |
+          meson --version; ninja --version; glslangValidator --version | head -n1; ccache --version | head -n1
+
+      - name: Fetch Mesa source at verified commit (official GitLab only)
+        run: |
+          set -euo pipefail
+          [ "$MESA_REPO_URL" = "https://gitlab.freedesktop.org/mesa/mesa.git" ] \
+            || { echo "::error::MESA_REPO_URL resmi depo degil"; exit 1; }
+          mkdir mesa && cd mesa
+          git init -q
+          git remote add origin "$MESA_REPO_URL"
+          if ! git fetch --depth 1 origin "$MESA_COMMIT"; then
+            echo "::warning::SHA ile fetch basarisiz; ref ile deneniyor: $MESA_REF"
+            git fetch --depth 1 origin "$MESA_REF"
+          fi
+          git checkout -q --detach FETCH_HEAD
+          ACTUAL="$(git rev-parse HEAD)"
+          if [ "$ACTUAL" != "$MESA_COMMIT" ]; then
+            echo "::error title=Commit uyusmazligi::Beklenen $MESA_COMMIT, alinan $ACTUAL"
+            exit 1
+          fi
+          echo "Mesa $(cat VERSION) @ $ACTUAL"
+
+      - name: Compute version metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          MESA_VER="$(tr -d '[:space:]' < mesa/VERSION)"
+          SHORT="${MESA_COMMIT:0:8}"
+          DATE="$(date -u +%Y%m%d)"
+          BASE="Turnip_A750_Mesa-${MESA_VER}_${SHORT}_${DATE}"
+          {
+            echo "mesa_ver=$MESA_VER"
+            echo "short=$SHORT"
+            echo "date=$DATE"
+            echo "base=$BASE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Paket adi: $BASE"
+
+      - name: Restore NDK archive cache
+        id: ndk_cache
+        uses: actions/cache@v4.2.0
         with:
-          ndk-version: r27
+          path: ${{ runner.temp }}/ndk-dl
+          key: ndk-zip-${{ env.NDK_VERSION }}-linux
 
-      # ═══════════════════════════════════════════
-      # 2. RESMİ MESA KAYNAK KODU (EN GÜNCEL MAIN HEAD)
-      # ═══════════════════════════════════════════
-      - name: Clone Official Mesa
+      - name: Download Android NDK from dl.google.com and verify SHA-1 (official manifest)
         run: |
-          git clone --depth=500 https://gitlab.freedesktop.org/mesa/mesa.git
-          cd mesa
-          echo "Mesa HEAD: $(git log --oneline -1)"
+          set -euo pipefail
+          ZIP="android-ndk-${NDK_VERSION}-linux.zip"
+          DL="$RUNNER_TEMP/ndk-dl"
+          mkdir -p "$DL"
+          if [ ! -s "$DL/$ZIP" ]; then
+            curl -fsSL --retry 5 --retry-delay 5 -o "$DL/$ZIP" "$NDK_DL_BASE/$ZIP"
+          fi
+          EXPECTED="$(curl -fsSL --retry 5 "$NDK_MANIFEST_URL" | python3 -c '
+          import sys, xml.etree.ElementTree as ET
+          name = sys.argv[1]
+          root = ET.fromstring(sys.stdin.read())
+          for a in root.iter("archive"):
+              c = a.find("complete")
+              if c is not None and c.findtext("url") == name:
+                  cs = c.find("checksum")
+                  if cs is not None and cs.get("type") == "sha1":
+                      print(cs.text.strip()); break
+          ' "$ZIP")"
+          [ -n "$EXPECTED" ] || { echo "::error::$ZIP icin resmi manifestte SHA-1 bulunamadi"; exit 1; }
+          ACTUAL="$(sha1sum "$DL/$ZIP" | awk '{print $1}')"
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error title=NDK SHA-1 uyusmuyor::beklenen=$EXPECTED gercek=$ACTUAL"
+            rm -f "$DL/$ZIP"
+            exit 1
+          fi
+          echo "NDK SHA-1 dogrulandi: $ACTUAL"
+          unzip -q "$DL/$ZIP" -d "$RUNNER_TEMP/ndk"
+          NDK_ROOT="$RUNNER_TEMP/ndk/android-ndk-${NDK_VERSION}"
+          test -x "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API}-clang"
+          echo "NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
+          echo "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
-      # ═══════════════════════════════════════════
-      # 3. SUBPROJECT TEMİZLİĞİ & RESMİ LIBDRM WRAP
-      # ═══════════════════════════════════════════
-      - name: Setup libdrm wrap and clean broken wraps
+      - name: Restore ccache
+        uses: actions/cache/restore@v4.2.0
+        with:
+          path: .ccache
+          key: ccache-a750-${{ env.NDK_VERSION }}-${{ needs.resolve.outputs.commit }}
+          restore-keys: |
+            ccache-a750-${{ env.NDK_VERSION }}-
+
+      - name: Write Meson cross file (aarch64-linux-android)
         run: |
-          mkdir -p mesa/subprojects
-          rm -f mesa/subprojects/*.wrap
-
-          cat > mesa/subprojects/libdrm.wrap << 'WRAPEOF'
-          [wrap-git]
-          directory = libdrm
-          url = https://gitlab.freedesktop.org/mesa/drm.git
-          revision = main
-          depth = 1
-
-          [provide]
-          libdrm = ext_libdrm
-          WRAPEOF
-
-      # ═══════════════════════════════════════════
-      # 4. ADRENO 750 ÖZEL KAYNAK YAMALARI (AÇIK KOD)
-      # ═══════════════════════════════════════════
-      - name: Apply Adreno 750 Source Optimizations
-        run: |
-          cd mesa
-          # Vulkan conformance sınırını kaldırarak başlatma kilitlenmelerini engelle:
-          for f in src/freedreno/vulkan/tu_device.cc src/freedreno/vulkan/tu_util.cc; do
-            if [ -f "$f" ]; then
-              sed -i 's/tu_env.debug & TU_DEBUG_NOCONFORM/true/g' "$f" || true
-            fi
-          done
-          echo "Kaynak optimizasyonları tamamlandı."
-
-      # ═══════════════════════════════════════════
-      # 5. CROSS-FILE (SD 8 GEN 3: CORTEX-X4 + FP16 + DOTPROD + I8MM)
-      # ═══════════════════════════════════════════
-      - name: Generate Meson Cross File
-        run: |
-          NDK="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64"
-          cat > cross-file.txt << EOF
+          set -euo pipefail
+          NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          C_ARGS=""
+          CXX_ARGS="'-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables'"
+          if [ -n "${CPU_TUNE:-}" ]; then
+            printf '%s' "$CPU_TUNE" | grep -Eq '^[a-z0-9.+-]+$' || { echo "::error::Gecersiz cpu_tune"; exit 1; }
+            C_ARGS="'-mtune=${CPU_TUNE}'"
+            CXX_ARGS="${CXX_ARGS}, '-mtune=${CPU_TUNE}'"
+          fi
+          cat > android-aarch64.ini <<EOF
           [binaries]
-          c = '${NDK}/bin/aarch64-linux-android33-clang'
-          cpp = '${NDK}/bin/aarch64-linux-android33-clang++'
-          ar = '${NDK}/bin/llvm-ar'
-          strip = '${NDK}/bin/llvm-strip'
+          ar = '${NDK_BIN}/llvm-ar'
+          c = ['ccache', '${NDK_BIN}/aarch64-linux-android${ANDROID_API}-clang']
+          cpp = ['ccache', '${NDK_BIN}/aarch64-linux-android${ANDROID_API}-clang++']
           c_ld = 'lld'
           cpp_ld = 'lld'
-          pkgconfig = '/bin/false'
-          pkg-config = '/bin/false'
+          strip = '${NDK_BIN}/llvm-strip'
+          pkg-config = ['/bin/false']
+
+          [built-in options]
+          c_args = [${C_ARGS}]
+          cpp_args = [${CXX_ARGS}]
+          cpp_link_args = ['-static-libstdc++']
 
           [host_machine]
-          system = 'linux'
+          system = 'android'
           cpu_family = 'aarch64'
           cpu = 'armv8'
           endian = 'little'
-
-          [built-in options]
-          c_args = ['-march=armv8.2-a+fp16+dotprod+i8mm', '-mtune=cortex-x4', '-O3', '-fomit-frame-pointer', '-fno-math-errno', '-fno-trapping-math', '-ffp-contract=fast', '-D__ANDROID__', '-Wno-error']
-          cpp_args = ['-march=armv8.2-a+fp16+dotprod+i8mm', '-mtune=cortex-x4', '-O3', '-fomit-frame-pointer', '-fno-math-errno', '-fno-trapping-math', '-ffp-contract=fast', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-D__ANDROID__', '-Wno-error']
-          c_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections', '-static-libstdc++']
-          cpp_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections', '-static-libstdc++']
           EOF
+          sed -i 's/^          //' android-aarch64.ini
+          cat android-aarch64.ini
 
-      # ═══════════════════════════════════════════
-      # 6. MESON SETUP (KGSL + BETA VULKAN + SIFIR LTO ÇÖKMESİ)
-      # ═══════════════════════════════════════════
-      - name: Meson Setup
+      - name: Configure (meson setup)
+        working-directory: mesa
         run: |
-          cd mesa
-          meson setup build \
-            --cross-file ../cross-file.txt \
-            --force-fallback-for=libdrm \
-            -Dlibdrm:default_library=static \
-            -Dlibdrm:tests=false \
-            -Dlibdrm:valgrind=disabled \
-            -Dbuildtype=release \
-            -Db_ndebug=true \
-            -Db_lto=false \
-            -Dstrip=true \
-            -Dplatforms=android \
-            -Dandroid-stub=true \
-            -Dplatform-sdk-version=33 \
-            -Dvulkan-drivers=freedreno \
-            -Dvulkan-beta=true \
-            -Dfreedreno-kmds=kgsl \
-            -Dgallium-drivers= \
-            -Degl=disabled \
-            -Dzstd=disabled \
-            -Dzlib=enabled \
-            -Dxmlconfig=disabled \
-            -Dllvm=disabled \
-            -Dspirv-to-dxil=false \
-            -Dandroid-libbacktrace=disabled \
-            -Dvalgrind=disabled \
+          set -euo pipefail
+          OPTS=(
+            --cross-file "$GITHUB_WORKSPACE/android-aarch64.ini"
+            --force-fallback-for=expat,zlib
+            -Dbuildtype=release
+            -Dstrip=true
+            -Dplatforms=android
+            -Dplatform-sdk-version="$PLATFORM_SDK"
+            -Dandroid-stub=true
+            -Dandroid-libbacktrace=disabled
+            -Dgallium-drivers=
+            -Dvulkan-drivers=freedreno
+            -Dvulkan-beta=true
+            -Dfreedreno-kmds=kgsl
+            -Degl=disabled
             -Dvideo-codecs=
+          )
+          if [ "$ENABLE_LTO" = "true" ]; then
+            OPTS+=(-Db_lto=true -Db_lto_mode=thin)
+          fi
+          echo "::group::meson setup options"
+          printf '%s\n' "${OPTS[@]}"
+          echo "::endgroup::"
+          if ! meson setup build-android-aarch64 "${OPTS[@]}"; then
+            echo "::error title=meson setup basarisiz::Asagidaki meson-log son satirlarina bakin (NDK/platform-sdk-version uyumu ilk suphelidir)."
+            tail -n 120 build-android-aarch64/meson-logs/meson-log.txt || true
+            exit 1
+          fi
 
-      # ═══════════════════════════════════════════
-      # 7. SÜRÜCÜYÜ DERLE (NINJA)
-      # ═══════════════════════════════════════════
-      - name: Build Driver with Ninja
-        run: ninja -C mesa/build
-
-      # ═══════════════════════════════════════════
-      # 8. ADRENOTOOLS PAKETLEME (PATCHELF RPATH TEMİZLEME + ASCII JSON)
-      # ═══════════════════════════════════════════
-      - name: Package AdrenoTools Driver
+      - name: Compile
+        working-directory: mesa
         run: |
-          NDK="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64"
-          mkdir -p package
+          set -euo pipefail
+          ccache -z
+          if ! ninja -C build-android-aarch64 -j"$(nproc)"; then
+            echo "::error title=ninja derleme hatasi::Ilk hata icin log'u inceleyin."
+            exit 1
+          fi
+          ccache -s || true
 
-          # 1. Dosyayı standart hedef adıyla kopyala:
-          cp mesa/build/src/freedreno/vulkan/libvulkan_freedreno.so package/vulkan.adreno.so
-
-          # 2. Sembolleri temizle (Optimum dosya boyutu):
-          ${NDK}/bin/llvm-strip --strip-unneeded package/vulkan.adreno.so
-
-          # 3. AdrenoTools / Vita3K / Winlator uyumu için SONAME damgala:
-          patchelf --set-soname vulkan.adreno.so package/vulkan.adreno.so
-
-          # 4. Güvenlik ve Taşınabilirlik: Host derleme arama yollarını (RPATH) temizle:
-          patchelf --remove-rpath package/vulkan.adreno.so || true
-
-          # 5. Saf ASCII Standart meta.json (minApi 28, bozuk karakter yok):
-          MESA_VER=$(tr -d '\n\r ' < mesa/VERSION 2>/dev/null || echo "git")
-          COMMIT_SHORT=$(git -C mesa rev-parse --short HEAD)
-          cat > package/meta.json << METAEOF
-          {
-            "schemaVersion": 1,
-            "name": "Turnip A750 Extreme (${COMMIT_SHORT})",
-            "description": "Adreno 750 (SM8650) - Cortex-X4 Tuned + FP16/DotProd/I8MM",
-            "author": "Forsker-r",
-            "packageVersion": "1",
-            "vendor": "Mesa",
-            "driverVersion": "Vulkan 1.3 (${MESA_VER})",
-            "minApi": 28,
-            "libraryName": "vulkan.adreno.so"
-          }
-          METAEOF
-
-          echo "=== Paket Doğrulama Denetimi ==="
-          readelf -d package/vulkan.adreno.so | grep -E "SONAME|RUNPATH|RPATH" || true
-          cat package/meta.json
-          ls -lh package/
-
-      # ═══════════════════════════════════════════
-      # 9. TEK FLAT ZIP ARTIFACT YÜKLE
-      # ═══════════════════════════════════════════
-      - name: Upload Turnip Driver Artifact
-        uses: actions/upload-artifact@v4
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4.2.0
         with:
-          name: Turnip-A750-SD8Gen3-Final
-          path: |
-            package/vulkan.adreno.so
-            package/meta.json
+          path: .ccache
+          key: ccache-a750-${{ env.NDK_VERSION }}-${{ needs.resolve.outputs.commit }}
+
+      - name: Locate, strip and validate the driver binary
+        id: bin
+        run: |
+          set -euo pipefail
+          SO="$(find mesa/build-android-aarch64 -name 'libvulkan_freedreno.so' -type f | head -n1)"
+          [ -n "$SO" ] || { echo "::error::libvulkan_freedreno.so bulunamadi"; exit 1; }
+          mkdir -p stage
+          cp "$SO" stage/libvulkan_freedreno.so
+          "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded stage/libvulkan_freedreno.so
+
+          H="$(readelf -h stage/libvulkan_freedreno.so)"
+          D="$(readelf -d stage/libvulkan_freedreno.so)"
+          echo "$H" | grep -q 'Machine:.*AArch64' || { echo "::error::ELF mimarisi AArch64 degil"; exit 1; }
+          echo "$H" | grep -q 'Type:.*DYN'        || { echo "::error::ELF tipi DYN degil"; exit 1; }
+          echo "$D" | grep -q 'NEEDED.*\[libc\.so\]' || { echo "::error::bionic libc.so bagimliligi yok"; exit 1; }
+          if echo "$D" | grep -Eq 'NEEDED.*\[(libc\.so\.6|libc\+\+_shared\.so)\]'; then
+            echo "::error::glibc veya libc++_shared.so bagimliligi var (Android sistem namespace'inde yok)"; exit 1
+          fi
+          strings stage/libvulkan_freedreno.so | grep -q '/dev/kgsl-3d0' \
+            || { echo "::error::KGSL backend izi (/dev/kgsl-3d0) yok"; exit 1; }
+          if ! "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D --defined-only stage/libvulkan_freedreno.so | grep -q HAL_MODULE_INFO_SYM; then
+            echo "::warning::HAL_MODULE_INFO_SYM disa aktarilmamis; libadrenotools yukleme yolunu cihazda dogrulayin"
+          fi
+          echo "NEEDED listesi:"; echo "$D" | grep NEEDED || true
+          ls -l stage/libvulkan_freedreno.so
+
+      - name: Package .adpkg-compatible zip (meta.json + library)
+        id: pkg
+        env:
+          MESA_VER: ${{ steps.meta.outputs.mesa_ver }}
+          SHORT: ${{ steps.meta.outputs.short }}
+          DATE: ${{ steps.meta.outputs.date }}
+          BASE: ${{ steps.meta.outputs.base }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg name "Turnip A750 Mesa ${MESA_VER} (${SHORT})" \
+            --arg desc "Mesa ${MESA_VER} turnip, commit ${MESA_COMMIT}, built ${DATE}, target Adreno 750 (SM8650), KGSL, official gitlab.freedesktop.org/mesa/mesa source" \
+            --arg author "$OWNER" \
+            --arg dv "Mesa ${MESA_VER} ${SHORT}" \
+            '{schemaVersion:1,name:$name,description:$desc,author:$author,packageVersion:"1",vendor:"Mesa",driverVersion:$dv,minApi:29,libraryName:"libvulkan_freedreno.so"}' \
+            > stage/meta.json
+          cat stage/meta.json
+
+          mkdir -p out
+          ( cd stage && zip -9 -X "../out/${BASE}.zip" meta.json libvulkan_freedreno.so )
+          cp "out/${BASE}.zip" "out/${BASE}.adpkg"
+
+          cat > out/BUILD_INFO.txt <<EOF
+          mesa_version   : ${MESA_VER}
+          mesa_ref       : ${MESA_REF}
+          mesa_commit    : ${MESA_COMMIT}
+          mesa_source    : ${MESA_REPO_URL}
+          build_date_utc : ${DATE}
+          target         : Adreno 750 (a7xx_gen3, chip-id 0x43051401), SM8650, Android/KGSL, aarch64
+          ndk            : ${NDK_VERSION} (clang aarch64-linux-android${ANDROID_API})
+          platform_sdk   : ${PLATFORM_SDK}
+          lto            : ${ENABLE_LTO}
+          cpu_tune       : ${CPU_TUNE:-none}
+          workflow_run   : ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          sed -i 's/^          //' out/BUILD_INFO.txt
+
+          ( cd out && sha256sum "${BASE}.zip" "${BASE}.adpkg" > SHA256SUMS.txt )
+          cat out/BUILD_INFO.txt out/SHA256SUMS.txt
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4.6.0
+        with:
+          name: ${{ steps.meta.outputs.base }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Job summary
+        run: |
+          {
+            echo "## Turnip A750 build"
+            echo ""
+            echo "- Mesa: \`${{ steps.meta.outputs.mesa_ver }}\` @ \`${MESA_COMMIT}\`"
+            echo "- Ref: \`${MESA_REF}\`"
+            echo "- NDK: \`${NDK_VERSION}\` (API ${ANDROID_API}), platform-sdk-version \`${PLATFORM_SDK}\`"
+            echo "- LTO: \`${ENABLE_LTO}\`, cpu_tune: \`${CPU_TUNE:-none}\`"
+            echo "- Release: \`${DO_RELEASE}\` (\`${RELEASE_TAG}\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish GitHub Release (optional)
+        if: env.DO_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MESA_VER: ${{ steps.meta.outputs.mesa_ver }}
+          BASE: ${{ steps.meta.outputs.base }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          Turnip (Mesa ${MESA_VER}) - Adreno 750 / Snapdragon 8 Gen 3, Android (KGSL), aarch64.
+
+          - Mesa commit: \`${MESA_COMMIT}\` (https://gitlab.freedesktop.org/mesa/mesa)
+          - Kaynak: yalnizca resmi Mesa GitLab; yama uygulanmamistir (duz upstream).
+          - NDK: ${NDK_VERSION}; Install: emulatorun "Adrenotools GPU Drivers / Add Custom Driver" ekrani (.zip veya .adpkg).
+
+          Calisma zamani ayarlari (derleme degil; Turnip dokumani 4.2, 4.5, 8, Ek A):
+          - Mesa >= 26.1 icin: \`TU_AUTOTUNE_ALGO=profiled\` denenebilir. Sorunda \`TU_DEBUG=gmem\` / \`sysmem\`, sonra \`noubwc\`, \`nolrz\`, \`nobin\`.
+          - Samsung One UI'da bozuk grafik: \`FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1\`.
+          - Cihaz adi sonunda "(raytracing disabled)" gorulurse ray query KGSL/fuse nedeniyle kapalidir.
+
+          Bu surum cihazda test edilmeden otomatik uretilmistir. SHA-256 icin SHA256SUMS.txt.
+          EOF
+          sed -i 's/^          //' notes.md
+          PRE=""
+          [ "$IS_MAIN" = "true" ] && PRE="--prerelease"
+          TITLE="Turnip A750 - Mesa ${MESA_VER} (${MESA_COMMIT:0:8})"
+          FILES=( "out/${BASE}.zip" "out/${BASE}.adpkg" out/SHA256SUMS.txt out/BUILD_INFO.txt )
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${FILES[@]}" --clobber
+            gh release edit "$RELEASE_TAG" --title "$TITLE" --notes-file notes.md
+          else
+            gh release create "$RELEASE_TAG" "${FILES[@]}" --title "$TITLE" --notes-file notes.md $PRE
+          fi
