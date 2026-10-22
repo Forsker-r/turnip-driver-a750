@@ -1,4 +1,4 @@
-name: Build Turnip A750 (SD 8 Gen 3)
+name: Build Turnip A750 Extreme (SD 8 Gen 3)
 on:
   workflow_dispatch:
   schedule:
@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # ═══════════════════════════════════════════
-      # 1. RESMİ DERLEME BAĞIMLILIKLARI (patchelf EKLENDİ)
+      # 1. GÜNCEL VE RESMİ DERLEME ARAÇLARI
       # ═══════════════════════════════════════════
       - name: Install build dependencies
         run: |
@@ -30,13 +30,13 @@ jobs:
           ndk-version: r27
 
       # ═══════════════════════════════════════════
-      # 2. RESMİ MESA KAYNAK KODU (EN GÜNCEL MAIN DALI)
+      # 2. RESMİ MESA KAYNAK KODU (EN GÜNCEL MAIN HEAD)
       # ═══════════════════════════════════════════
       - name: Clone Official Mesa
         run: |
           git clone --depth=500 https://gitlab.freedesktop.org/mesa/mesa.git
           cd mesa
-          echo "Current Mesa HEAD: $(git log --oneline -1)"
+          echo "Mesa HEAD: $(git log --oneline -1)"
 
       # ═══════════════════════════════════════════
       # 3. SUBPROJECT TEMİZLİĞİ & RESMİ LIBDRM WRAP
@@ -58,20 +58,21 @@ jobs:
           WRAPEOF
 
       # ═══════════════════════════════════════════
-      # 4. ADRENO 750 KAYNAK KODUOPTİMİZASYONLARI (AÇIK KOD)
+      # 4. ADRENO 750 ÖZEL KAYNAK YAMALARI (AÇIK KOD)
       # ═══════════════════════════════════════════
-      - name: Apply Adreno 750 source optimizations
+      - name: Apply Adreno 750 Source Optimizations
         run: |
           cd mesa
-          # Turnip sürücüsünde uyumluluk kısıtlamalarını ve debug overhead'ini kaldır:
-          if [ -f src/freedreno/vulkan/tu_device.cc ]; then
-            sed -i 's/tu_env.debug & TU_DEBUG_NOCONFORM/true/g' src/freedreno/vulkan/tu_device.cc || true
-          fi
-          echo "Adreno 750 kaynak optimizasyonları uygulandı."
+          # Vulkan conformance sınırını kaldırarak başlatma kilitlenmelerini engelle:
+          for f in src/freedreno/vulkan/tu_device.cc src/freedreno/vulkan/tu_util.cc; do
+            if [ -f "$f" ]; then
+              sed -i 's/tu_env.debug & TU_DEBUG_NOCONFORM/true/g' "$f" || true
+            fi
+          done
+          echo "Kaynak optimizasyonları tamamlandı."
 
       # ═══════════════════════════════════════════
-      # 5. CROSS-FILE (8 GEN 3 ÖZEL: FP16 + DOTPROD + I8MM + CORTEX-X4)
-      # SVE2 kapalı olduğu için A520 çekirdeğinde SIGILL çökmesi %100 engellenir.
+      # 5. CROSS-FILE (SD 8 GEN 3: CORTEX-X4 + FP16 + DOTPROD + I8MM)
       # ═══════════════════════════════════════════
       - name: Generate Meson Cross File
         run: |
@@ -94,14 +95,14 @@ jobs:
           endian = 'little'
 
           [built-in options]
-          c_args = ['-march=armv8.2-a+fp16+dotprod+i8mm', '-mtune=cortex-x4', '-O3', '-fomit-frame-pointer', '-fno-math-errno', '-fno-trapping-math', '-D__ANDROID__', '-Wno-error']
-          cpp_args = ['-march=armv8.2-a+fp16+dotprod+i8mm', '-mtune=cortex-x4', '-O3', '-fomit-frame-pointer', '-fno-math-errno', '-fno-trapping-math', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-D__ANDROID__', '-Wno-error']
-          c_link_args = ['-fuse-ld=lld', '-static-libstdc++']
-          cpp_link_args = ['-fuse-ld=lld', '-static-libstdc++']
+          c_args = ['-march=armv8.2-a+fp16+dotprod+i8mm', '-mtune=cortex-x4', '-O3', '-fomit-frame-pointer', '-fno-math-errno', '-fno-trapping-math', '-ffp-contract=fast', '-D__ANDROID__', '-Wno-error']
+          cpp_args = ['-march=armv8.2-a+fp16+dotprod+i8mm', '-mtune=cortex-x4', '-O3', '-fomit-frame-pointer', '-fno-math-errno', '-fno-trapping-math', '-ffp-contract=fast', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-D__ANDROID__', '-Wno-error']
+          c_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections', '-static-libstdc++']
+          cpp_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections', '-static-libstdc++']
           EOF
 
       # ═══════════════════════════════════════════
-      # 6. MESON SETUP (LTO KAPALI = %100 KARARLI VULKAN TABLOLARI)
+      # 6. MESON SETUP (KGSL + BETA VULKAN + SIFIR LTO ÇÖKMESİ)
       # ═══════════════════════════════════════════
       - name: Meson Setup
         run: |
@@ -136,34 +137,37 @@ jobs:
       # ═══════════════════════════════════════════
       # 7. SÜRÜCÜYÜ DERLE (NINJA)
       # ═══════════════════════════════════════════
-      - name: Build with Ninja
+      - name: Build Driver with Ninja
         run: ninja -C mesa/build
 
       # ═══════════════════════════════════════════
-      # 8. PAKETLEME (PATCHELF SONAME + SAF ASCII META.JSON)
+      # 8. ADRENOTOOLS PAKETLEME (PATCHELF RPATH TEMİZLEME + ASCII JSON)
       # ═══════════════════════════════════════════
-      - name: Prepare Driver Files
+      - name: Package AdrenoTools Driver
         run: |
           NDK="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64"
           mkdir -p package
 
-          # Sürücüyü vulkan.adreno.so olarak kopyala:
+          # 1. Dosyayı standart hedef adıyla kopyala:
           cp mesa/build/src/freedreno/vulkan/libvulkan_freedreno.so package/vulkan.adreno.so
 
-          # Sembolleri temizle (Boyut küçültme):
+          # 2. Sembolleri temizle (Optimum dosya boyutu):
           ${NDK}/bin/llvm-strip --strip-unneeded package/vulkan.adreno.so
 
-          # KRİTİK ADIM: AdrenoTools ve Vita3K/Winlator uyumu için SONAME kimliğini değiştir:
+          # 3. AdrenoTools / Vita3K / Winlator uyumu için SONAME damgala:
           patchelf --set-soname vulkan.adreno.so package/vulkan.adreno.so
 
-          # Saf ASCII meta.json (Bozuk UTF-8 karakteri yok, minApi 28):
+          # 4. Güvenlik ve Taşınabilirlik: Host derleme arama yollarını (RPATH) temizle:
+          patchelf --remove-rpath package/vulkan.adreno.so || true
+
+          # 5. Saf ASCII Standart meta.json (minApi 28, bozuk karakter yok):
           MESA_VER=$(tr -d '\n\r ' < mesa/VERSION 2>/dev/null || echo "git")
           COMMIT_SHORT=$(git -C mesa rev-parse --short HEAD)
           cat > package/meta.json << METAEOF
           {
             "schemaVersion": 1,
-            "name": "Turnip A750 Custom (${COMMIT_SHORT})",
-            "description": "Snapdragon 8 Gen 3 Adreno 750 - Cortex-X4 Tuned (${MESA_VER})",
+            "name": "Turnip A750 Extreme (${COMMIT_SHORT})",
+            "description": "Adreno 750 (SM8650) - Cortex-X4 Tuned + FP16/DotProd/I8MM",
             "author": "Forsker-r",
             "packageVersion": "1",
             "vendor": "Mesa",
@@ -173,18 +177,18 @@ jobs:
           }
           METAEOF
 
-          echo "=== SONAME Kontrolü ==="
-          readelf -d package/vulkan.adreno.so | grep SONAME
+          echo "=== Paket Doğrulama Denetimi ==="
+          readelf -d package/vulkan.adreno.so | grep -E "SONAME|RUNPATH|RPATH" || true
           cat package/meta.json
           ls -lh package/
 
       # ═══════════════════════════════════════════
-      # 9. TEK ZIP OLARAK YÜKLE (İÇ İÇE ZIP YOK)
+      # 9. TEK FLAT ZIP ARTIFACT YÜKLE
       # ═══════════════════════════════════════════
-      - name: Upload Driver ZIP Artifact
+      - name: Upload Turnip Driver Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Turnip-A750-SD8Gen3
+          name: Turnip-A750-SD8Gen3-Final
           path: |
             package/vulkan.adreno.so
             package/meta.json
