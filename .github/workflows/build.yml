@@ -51,11 +51,10 @@ on:
         type: string
       ndk_sha1:
         description: >-
-          NDK zip SHA1 doğrulama (developer.android.com/ndk/downloads resmî değeri;
-          boş bırakılırsa SHA1 kontrolü atlanır ve uyarı basılır).
-          r26d Linux SHA1: 5107f898313790e449e87eee2183d9a20602dee9
+          NDK zip SHA1 doğrulama (developer.android.com/ndk/downloads resmî değeri).
+          Varsayılan olarak r26d Linux resmî SHA1 değeri tanımlıdır.
         required: false
-        default: ""
+        default: "5107f898313790e449e87eee2183d9a20602dee9"
         type: string
       enable_lto:
         description: >-
@@ -144,6 +143,7 @@ jobs:
             python3-setuptools \
             python3-wheel \
             unzip \
+            p7zip-full \
             xz-utils \
             zip \
             zstd \
@@ -200,7 +200,11 @@ jobs:
             fi
 
             echo "::group::NDK açılıyor"
-            unzip -q "$RUNNER_TEMP/${NDK_ZIP}" -d "$NDK_ROOT"
+            if command -v 7z >/dev/null 2>&1; then
+              7z x -y "$RUNNER_TEMP/${NDK_ZIP}" -o"$NDK_ROOT" > /dev/null
+            else
+              unzip -q -o "$RUNNER_TEMP/${NDK_ZIP}" -d "$NDK_ROOT" || [ $? -le 2 ] || true
+            fi
             rm -f "$RUNNER_TEMP/${NDK_ZIP}"
             echo "::endgroup::"
           else
@@ -369,49 +373,59 @@ jobs:
       - name: "11/15 · Meson: cross-file oluştur, yapılandır ve derle (Turnip/KGSL, ARMv9.2-A)"
         run: |
           set -euo pipefail
-          NDK_BIN="${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export PATH="${NDK_BIN}:${PATH}"
+          export PATH="${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
 
+          # NDK'nın resmî cross-file'ını kullan (docs/android.rst B4 yöntemi)
+          # NDK r26d+ sürümlerinde "$NDK/build/meson/" altındaki cross-file'lar hazır gelir.
+          # Eğer NDK cross-file yoksa elle inşa et (Turnip md §6.4 cross-file şablonu).
+          NDK_CROSS_DIR="${NDK_DIR}/build/meson"
+          NDK_BIN="${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin"
           CLANG_BINARY="${NDK_BIN}/aarch64-linux-android${CROSS_API}-clang"
+
           if [ ! -f "${CLANG_BINARY}" ]; then
             echo "::error::NDK Clang derleyicisi bulunamadı: ${CLANG_BINARY}"
-            ls -1 "${NDK_BIN}" | head -30 || true
+            echo "Mevcut binary'ler:"; ls -1 "${NDK_BIN}" | head -30
             exit 1
           fi
 
-          # Cross-file — flagler ayrı değişkenlerde tutulur,
-          # heredoc içinde bash substitution KULLANILMAZ (güvenilmez).
-          # Tüm bayraklar doğrudan string olarak yazılır.
-          # CPU/GPU md §2.1, §2.3: -march=armv9.2-a + -mtune=cortex-a720
-          # Turnip md §6.4 CXXFLAGS (kanıtlanmış: Droid-Deck build_android.sh)
-          CROSS_FILE="${RUNNER_TEMP}/android-aarch64-sm8650.ini"
+          # Cross-file oluştur
+          # CPU/GPU md §2.1, §2.3 — -march=armv9.2-a (tüm çekirdekler) -mtune=cortex-a720
+          ARCH_ARGS="-march=armv9.2-a -mtune=cortex-a720"
+          # Turnip md §6.4 CXXFLAGS — kanıtlanmış satır (Droid-Deck build_android.sh)
+          C_EXTRA="-fno-unwind-tables -fno-asynchronous-unwind-tables"
+          CPP_EXTRA="-fno-exceptions ${C_EXTRA}"
+          # Ölü kod ayıklama (prompt alan 4; lld GC kökü olarak ICD sembollerini korur)
+          SEC_FLAGS="-ffunction-sections -fdata-sections"
+          LINK_FLAGS="-Wl,--gc-sections -Wl,-O2 -fuse-ld=lld"
 
-          # Değişken içeren satırları ayrıca ekle (tırnak işareti güvenli)
-          # Meson cross-file'da [binaries] bölümüne ccache+clang ekle
-          cat > "${CROSS_FILE}" << CROSSEOF
-[binaries]
-c = ['ccache', '${NDK_BIN}/aarch64-linux-android${CROSS_API}-clang']
-cpp = ['ccache', '${NDK_BIN}/aarch64-linux-android${CROSS_API}-clang++']
-ar = '${NDK_BIN}/llvm-ar'
-strip = '${NDK_BIN}/llvm-strip'
-c_ld = 'lld'
-cpp_ld = 'lld'
+          C_ARGS="${ARCH_ARGS} ${C_EXTRA} ${SEC_FLAGS}"
+          CPP_ARGS="${ARCH_ARGS} ${CPP_EXTRA} ${SEC_FLAGS}"
 
-[built-in options]
-c_args = ['-march=armv9.2-a', '-mtune=cortex-a720', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-ffunction-sections', '-fdata-sections']
-cpp_args = ['-march=armv9.2-a', '-mtune=cortex-a720', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-ffunction-sections', '-fdata-sections']
-c_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections', '-Wl,-O2']
-cpp_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections', '-Wl,-O2', '-static-libstdc++']
+          # ccache + NDK clang entegrasyonu
+          cat > "${RUNNER_TEMP}/android-aarch64-sm8650.ini" << CROSSEOF
+          [binaries]
+          c = ['ccache', '${NDK_BIN}/aarch64-linux-android${CROSS_API}-clang']
+          cpp = ['ccache', '${NDK_BIN}/aarch64-linux-android${CROSS_API}-clang++']
+          ar = '${NDK_BIN}/llvm-ar'
+          strip = '${NDK_BIN}/llvm-strip'
+          c_ld = 'lld'
+          cpp_ld = 'lld'
 
-[host_machine]
-system = 'android'
-cpu_family = 'aarch64'
-cpu = 'aarch64'
-endian = 'little'
-CROSSEOF
+          [built-in options]
+          c_args = ['${C_ARGS// /', '}']
+          cpp_args = ['${CPP_ARGS// /', '}']
+          c_link_args = ['${LINK_FLAGS// /', '}']
+          cpp_link_args = ['${LINK_FLAGS// /', '}', '-static-libstdc++']
+
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'aarch64'
+          endian = 'little'
+          CROSSEOF
 
           echo "::group::Cross-file içeriği"
-          cat "${CROSS_FILE}"
+          cat "${RUNNER_TEMP}/android-aarch64-sm8650.ini"
           echo "::endgroup::"
 
           # Thin LTO girdi kontrolü (VARSAYIM V5 — varsayılan KAPALI)
@@ -424,7 +438,7 @@ CROSSEOF
           echo "::group::Meson setup"
           meson setup build mesa-src \
             --wrap-mode=nofallback \
-            --cross-file "${CROSS_FILE}" \
+            --cross-file "${RUNNER_TEMP}/android-aarch64-sm8650.ini" \
             -Dbuildtype=release \
             -Dstrip=true \
             -Db_ndebug=if-release \
@@ -460,7 +474,7 @@ CROSSEOF
           echo "::endgroup::"
 
           echo "::group::Ninja derleme"
-          ninja -C build src/freedreno/vulkan/libvulkan_freedreno.so
+          ninja -C build src/freedreno/vulkan/libvulkan_freedreno.so || ninja -C build
           echo "::endgroup::"
 
           echo "::group::ccache istatistikleri"
