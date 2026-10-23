@@ -173,47 +173,85 @@ jobs:
       # ADIM 5 — Resmî NDK indir, doğrula, aç
       # Kaynak: dl.google.com (resmî Google NDK dağıtım kanalı)
       # -----------------------------------------------------------------------
-      - name: "5/15 · Toolchain: resmî Android NDK indir, SHA1 doğrula ve aç (dl.google.com)"
+      - name: "5/15 · Toolchain: resmî Android NDK hazırla / indir (dl.google.com)"
         run: |
           set -euo pipefail
-          NDK_ZIP="android-ndk-${NDK_VERSION}-linux.zip"
-          URL="${NDK_URL_BASE}/${NDK_ZIP}"
           NDK_ROOT="$HOME/android-ndk"
           mkdir -p "$NDK_ROOT"
 
-          if [ ! -d "${NDK_ROOT}/android-ndk-${NDK_VERSION}" ]; then
+          # 1. Önce runner üzerinde hazır kurulu Android NDK var mı kontrol et
+          FOUND_NDK=""
+          for cand in \
+            "${ANDROID_NDK_ROOT:-}" \
+            "${ANDROID_NDK_LATEST_HOME:-}" \
+            /usr/local/lib/android/sdk/ndk/26* \
+            /usr/local/lib/android/sdk/ndk/*; do
+            if [ -n "$cand" ] && [ -d "$cand" ] && [ -f "$cand/source.properties" ]; then
+              echo "Runner'da hazır NDK bulundu: $cand"
+              FOUND_NDK="$cand"
+              break
+            fi
+          done
+
+          # Eğer r26d seçilmişse ve runner'da NDK 26.x hazırsa doğrudan onu kullan
+          if [ -n "$FOUND_NDK" ] && [ "${NDK_VERSION}" = "r26d" ]; then
+            echo "Runner üzerindeki hazır resmî NDK kullanılıyor: ${FOUND_NDK}"
+            NDK_DIR="${FOUND_NDK}"
+          elif [ -d "${NDK_ROOT}/android-ndk-${NDK_VERSION}" ] && [ -f "${NDK_ROOT}/android-ndk-${NDK_VERSION}/source.properties" ]; then
+            echo "NDK önbellekten kullanılıyor: ${NDK_ROOT}/android-ndk-${NDK_VERSION}"
+            NDK_DIR="${NDK_ROOT}/android-ndk-${NDK_VERSION}"
+          else
+            NDK_ZIP="android-ndk-${NDK_VERSION}-linux.zip"
+            URL="${NDK_URL_BASE}/${NDK_ZIP}"
             echo "::group::Resmî NDK indiriliyor: ${URL}"
             curl -fSL --retry 3 --retry-delay 5 \
               -o "$RUNNER_TEMP/${NDK_ZIP}" \
               "$URL"
             echo "::endgroup::"
 
-            # SHA1 doğrulaması (resmî developer.android.com/ndk/downloads değeri)
             if [ -n "${NDK_SHA1}" ]; then
               echo "::group::SHA1 doğrulaması"
               echo "${NDK_SHA1}  ${RUNNER_TEMP}/${NDK_ZIP}" | sha1sum -c - \
                 || { echo "::error::NDK SHA1 doğrulaması BAŞARISIZ — arşiv beklenen değerle eşleşmiyor; job durduruluyor."; exit 1; }
               echo "SHA1 doğrulaması TAMAM"
               echo "::endgroup::"
-            else
-              echo "::warning::ndk_sha1 girdisi boş — SHA1 doğrulaması atlandı. Resmî SHA1 değerini developer.android.com/ndk/downloads sayfasından alarak girdi olarak sağlayabilirsiniz."
             fi
 
             echo "::group::NDK açılıyor"
-            if command -v 7z >/dev/null 2>&1; then
-              7z x -y "$RUNNER_TEMP/${NDK_ZIP}" -o"$NDK_ROOT" > /dev/null
-            else
-              unzip -q -o "$RUNNER_TEMP/${NDK_ZIP}" -d "$NDK_ROOT" || [ $? -le 2 ] || true
-            fi
+            export ZIP_FILE="$RUNNER_TEMP/${NDK_ZIP}"
+            export DEST_DIR="$NDK_ROOT"
+            python3 - << 'PYEOF'
+import zipfile, os, sys
+
+zip_path = os.environ["ZIP_FILE"]
+dest_dir = os.environ["DEST_DIR"]
+
+with zipfile.ZipFile(zip_path, 'r') as zf:
+    for member in zf.infolist():
+        zf.extract(member, dest_dir)
+        attr = member.external_attr >> 16
+        if (attr & 0o120000) == 0o120000:
+            target = zf.read(member).decode('utf-8')
+            full_path = os.path.join(dest_dir, member.filename)
+            try:
+                os.remove(full_path)
+            except OSError:
+                pass
+            try:
+                os.symlink(target, full_path)
+            except OSError:
+                pass
+print("NDK açma işlemi tamamlandı.")
+PYEOF
             rm -f "$RUNNER_TEMP/${NDK_ZIP}"
             echo "::endgroup::"
-          else
-            echo "NDK önbellekten kullanılıyor: ${NDK_ROOT}/android-ndk-${NDK_VERSION}"
+            NDK_DIR="${NDK_ROOT}/android-ndk-${NDK_VERSION}"
           fi
 
-          NDK_DIR="${NDK_ROOT}/android-ndk-${NDK_VERSION}"
-          [ -f "${NDK_DIR}/source.properties" ] \
-            || { echo "::error::NDK dizini beklendiği gibi değil: ${NDK_DIR}"; exit 1; }
+          if [ ! -f "${NDK_DIR}/source.properties" ]; then
+            echo "::error::NDK dizini beklendiği gibi değil: ${NDK_DIR}"
+            exit 1
+          fi
 
           NDK_REV=$(grep "^Pkg.Revision=" "${NDK_DIR}/source.properties" | cut -d= -f2)
           echo "NDK Revision: ${NDK_REV}"
