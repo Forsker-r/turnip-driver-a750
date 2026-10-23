@@ -369,59 +369,49 @@ jobs:
       - name: "11/15 · Meson: cross-file oluştur, yapılandır ve derle (Turnip/KGSL, ARMv9.2-A)"
         run: |
           set -euo pipefail
-          export PATH="${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
-
-          # NDK'nın resmî cross-file'ını kullan (docs/android.rst B4 yöntemi)
-          # NDK r26d+ sürümlerinde "$NDK/build/meson/" altındaki cross-file'lar hazır gelir.
-          # Eğer NDK cross-file yoksa elle inşa et (Turnip md §6.4 cross-file şablonu).
-          NDK_CROSS_DIR="${NDK_DIR}/build/meson"
           NDK_BIN="${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          CLANG_BINARY="${NDK_BIN}/aarch64-linux-android${CROSS_API}-clang"
+          export PATH="${NDK_BIN}:${PATH}"
 
+          CLANG_BINARY="${NDK_BIN}/aarch64-linux-android${CROSS_API}-clang"
           if [ ! -f "${CLANG_BINARY}" ]; then
             echo "::error::NDK Clang derleyicisi bulunamadı: ${CLANG_BINARY}"
-            echo "Mevcut binary'ler:"; ls -1 "${NDK_BIN}" | head -30
+            ls -1 "${NDK_BIN}" | head -30 || true
             exit 1
           fi
 
-          # Cross-file oluştur
-          # CPU/GPU md §2.1, §2.3 — -march=armv9.2-a (tüm çekirdekler) -mtune=cortex-a720
-          ARCH_ARGS="-march=armv9.2-a -mtune=cortex-a720"
-          # Turnip md §6.4 CXXFLAGS — kanıtlanmış satır (Droid-Deck build_android.sh)
-          C_EXTRA="-fno-unwind-tables -fno-asynchronous-unwind-tables"
-          CPP_EXTRA="-fno-exceptions ${C_EXTRA}"
-          # Ölü kod ayıklama (prompt alan 4; lld GC kökü olarak ICD sembollerini korur)
-          SEC_FLAGS="-ffunction-sections -fdata-sections"
-          LINK_FLAGS="-Wl,--gc-sections -Wl,-O2 -fuse-ld=lld"
+          # Cross-file — flagler ayrı değişkenlerde tutulur,
+          # heredoc içinde bash substitution KULLANILMAZ (güvenilmez).
+          # Tüm bayraklar doğrudan string olarak yazılır.
+          # CPU/GPU md §2.1, §2.3: -march=armv9.2-a + -mtune=cortex-a720
+          # Turnip md §6.4 CXXFLAGS (kanıtlanmış: Droid-Deck build_android.sh)
+          CROSS_FILE="${RUNNER_TEMP}/android-aarch64-sm8650.ini"
 
-          C_ARGS="${ARCH_ARGS} ${C_EXTRA} ${SEC_FLAGS}"
-          CPP_ARGS="${ARCH_ARGS} ${CPP_EXTRA} ${SEC_FLAGS}"
+          # Değişken içeren satırları ayrıca ekle (tırnak işareti güvenli)
+          # Meson cross-file'da [binaries] bölümüne ccache+clang ekle
+          cat > "${CROSS_FILE}" << CROSSEOF
+[binaries]
+c = ['ccache', '${NDK_BIN}/aarch64-linux-android${CROSS_API}-clang']
+cpp = ['ccache', '${NDK_BIN}/aarch64-linux-android${CROSS_API}-clang++']
+ar = '${NDK_BIN}/llvm-ar'
+strip = '${NDK_BIN}/llvm-strip'
+c_ld = 'lld'
+cpp_ld = 'lld'
 
-          # ccache + NDK clang entegrasyonu
-          cat > "${RUNNER_TEMP}/android-aarch64-sm8650.ini" << CROSSEOF
-          [binaries]
-          c = ['ccache', '${NDK_BIN}/aarch64-linux-android${CROSS_API}-clang']
-          cpp = ['ccache', '${NDK_BIN}/aarch64-linux-android${CROSS_API}-clang++']
-          ar = '${NDK_BIN}/llvm-ar'
-          strip = '${NDK_BIN}/llvm-strip'
-          c_ld = 'lld'
-          cpp_ld = 'lld'
+[built-in options]
+c_args = ['-march=armv9.2-a', '-mtune=cortex-a720', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-ffunction-sections', '-fdata-sections']
+cpp_args = ['-march=armv9.2-a', '-mtune=cortex-a720', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-ffunction-sections', '-fdata-sections']
+c_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections', '-Wl,-O2']
+cpp_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections', '-Wl,-O2', '-static-libstdc++']
 
-          [built-in options]
-          c_args = ['${C_ARGS// /', '}']
-          cpp_args = ['${CPP_ARGS// /', '}']
-          c_link_args = ['${LINK_FLAGS// /', '}']
-          cpp_link_args = ['${LINK_FLAGS// /', '}', '-static-libstdc++']
-
-          [host_machine]
-          system = 'android'
-          cpu_family = 'aarch64'
-          cpu = 'aarch64'
-          endian = 'little'
-          CROSSEOF
+[host_machine]
+system = 'android'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+CROSSEOF
 
           echo "::group::Cross-file içeriği"
-          cat "${RUNNER_TEMP}/android-aarch64-sm8650.ini"
+          cat "${CROSS_FILE}"
           echo "::endgroup::"
 
           # Thin LTO girdi kontrolü (VARSAYIM V5 — varsayılan KAPALI)
@@ -434,7 +424,7 @@ jobs:
           echo "::group::Meson setup"
           meson setup build mesa-src \
             --wrap-mode=nofallback \
-            --cross-file "${RUNNER_TEMP}/android-aarch64-sm8650.ini" \
+            --cross-file "${CROSS_FILE}" \
             -Dbuildtype=release \
             -Dstrip=true \
             -Db_ndebug=if-release \
