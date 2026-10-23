@@ -100,7 +100,7 @@ jobs:
       # 2) Depo checkout (Mesa kaynağı DEĞİLDİR — yalnız workflow dosyaları)
       # -----------------------------------------------------------------------
       - name: "Checkout: turnip-driver-a750 deposu"
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        uses: actions/checkout@v4  # Node.js 24 uyumlu; pin için: ghcr.io/actions/checkout
 
       # -----------------------------------------------------------------------
       # 3) Derleme bağımlılıkları
@@ -147,7 +147,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: "Cache: resmî Android NDK"
         id: cache_ndk
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        uses: actions/cache@v4  # Node.js 24 uyumlu
         with:
           path: ${{ runner.temp }}/android-ndk
           key: ndk-linux-${{ env.NDK_VERSION }}-v1
@@ -273,29 +273,53 @@ jobs:
             ccache-a750-${{ env.NDK_VERSION }}-
 
       # -----------------------------------------------------------------------
-      # 10) Meson yapılandırma
+      # 10) Meson cross-file üretimi + yapılandırma
       #     Çekirdek: Turnip md §6.4 kanıtlanmış Droid-Deck build_android.sh
       #     ISA: CPU/GPU md §2.1 (tüm çekirdekler ARMv9.2-A) + §2.3 (TuneX4)
-      #     Ekler: bileşen kapama (prompt alan 1), gc-sections, lld-O2, NDEBUG
+      #     NOT: NDK r26d'de build/meson/ built-in cross-file YOKTUR.
+      #          Cross-file NDK toolchain bin yollarına göre manuel üretilir.
       # -----------------------------------------------------------------------
-      - name: "Meson: cross-file + kanıtlanmış parametrelerle yapılandır"
+      - name: "Meson: cross-file oluştur + kanıtlanmış parametrelerle yapılandır"
         run: |
           set -euo pipefail
-          export PATH="${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
+          NDK_TOOLCHAIN="${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export PATH="${NDK_TOOLCHAIN}:${PATH}"
 
-          # NDK built-in meson cross-file kullan (resmî NDK artefaktı)
-          CROSS="${NDK_DIR}/build/meson/aarch64-linux-android${CROSS_API}-clang"
-          if [ ! -f "${CROSS}" ]; then
-            echo "::error::NDK meson cross-file bulunamadı: ${CROSS}"
-            echo "Mevcut cross-file'lar:"; ls -1 "${NDK_DIR}/build/meson/" 2>/dev/null || true
+          # NDK toolchain derleyicisini doğrula
+          CLANG_BIN="${NDK_TOOLCHAIN}/aarch64-linux-android${CROSS_API}-clang"
+          if [ ! -x "${CLANG_BIN}" ]; then
+            echo "::error::NDK clang bulunamadı: ${CLANG_BIN}"
+            echo "Mevcut clang binary'leri:"; ls -1 "${NDK_TOOLCHAIN}/aarch64-linux-android"*-clang 2>/dev/null || true
             exit 1
           fi
-          echo "Cross-file: ${CROSS}"
+          echo "NDK clang: ${CLANG_BIN}"
 
           # ccache yapılandır
           ccache --set-config=max_size=1G
           ccache --set-config=compression=true
           ccache --zero-stats
+
+          # Meson cross-file manuel üret (Turnip md §6.4 Droid-Deck cross-file şablonu)
+          # NDK r26d'de build/meson/ built-in cross-file yoktur; toolchain bin'den üretilir.
+          CROSS="${RUNNER_TEMP}/android-aarch64-sm8650.ini"
+          cat > "${CROSS}" << CROSSEOF
+          [binaries]
+          c = ['ccache', '${NDK_TOOLCHAIN}/aarch64-linux-android${CROSS_API}-clang']
+          cpp = ['ccache', '${NDK_TOOLCHAIN}/aarch64-linux-android${CROSS_API}-clang++']
+          ar = '${NDK_TOOLCHAIN}/llvm-ar'
+          strip = '${NDK_TOOLCHAIN}/llvm-strip'
+          c_ld = 'lld'
+          cpp_ld = 'lld'
+
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'aarch64'
+          endian = 'little'
+          CROSSEOF
+
+          echo "Cross-file oluşturuldu: ${CROSS}"
+          cat "${CROSS}"
 
           # ISA hedefleme:
           # -march=armv9.2-a: CPU/GPU md §2.1 (X4+A720+A520 tümü ARMv9.2-A, AArch64-only)
