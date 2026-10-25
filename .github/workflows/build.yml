@@ -1,4 +1,33 @@
-name: Build Official Upstream Turnip A750 (Snapdragon 8 Gen 3)
+# =============================================================================
+# turnip-driver-a750 — %100 Resmî Mesa Upstream Turnip Derleme Hattı (v4 Master)
+# Hedef SoC / GPU : Qualcomm Snapdragon 8 Gen 3 (SM8650) / Adreno 750
+# Sürücü Kimliği  : FD750 (a7xx_gen3), KGSL Chip-ID 0x43051401, Vulkan 1.4
+#
+# MİMARİ VE GÜVENLİK GARANTİLERİ (prompt-v4.md & Teknik Doküman Uyumlu):
+#  1. %100 SAF UPSTREAM KAYNAK: Yalnızca resmî gitlab.freedesktop.org/mesa/mesa.git
+#     deposu kullanılır. Hiçbir fork, mirror veya üçüncü taraf script kullanılmaz.
+#  2. SIFIR YAMA (ZERO PATCH): git apply, git am, patch, quilt, sed, awk veya
+#     python ile kaynak ağacında tek bir bayt bile değiştirilmez. Klonlama sonrası
+#     ve derleme öncesi 'git status --porcelain' + SHA kapısı ile doğrulanır.
+#  3. SIFIR RUNTIME GÖMME: TU_DEBUG, TU_AUTOTUNE_ALGO, TU_GMEM, FD_DEV_FEATURES
+#     veya driconf profilleri ikili dosyaya gömülmez; sürücü saf upstream
+#     varsayılanlarıyla (Mesa 26.1+ C++ Autotuner dahil) çalışır.
+#  4. HOMOJEN ARMv9.2-A + CORTEX-A720/X4 HEDEFLEME (CPU/GPU md §2.1, §2.2, §2.3):
+#     8 çekirdeğin tamamında (1× X4 + 5× A720 + 2× A520) ortak olan EL0 ARMv9.2-A
+#     komut seti (-march=armv9.2-a+crc+crypto; imli DotProd, FP16, BF16, I8MM,
+#     LSE/LSE2, LRCPC2) ve varsayılan 5× A720 performans kümesi füzyonları
+#     (-mtune=cortex-a720: CMP+B.cc, CMP+CSEL, ADRP+ADD, hızlı LSL ALU) kullanılır.
+#  5. YAMASIZ DERLEYİCİ / BAĞLAYICI OPTİMİZASYONU (Turnip md §6.4 + LLD):
+#     -Dbuildtype=release (-O3), -Db_ndebug=true, -Db_lto=true (-Db_lto_mode=thin),
+#     -Dstrip=true, -fno-exceptions, -fno-unwind-tables, -fno-asynchronous-unwind-tables,
+#     -ffunction-sections, -fdata-sections, -Wl,--gc-sections, -Wl,-O2, -static-libstdc++.
+#  6. SIKI İKİLİ (ELF / BIONIC / SEMBOL) VE PAKET DOĞRULAMA KAPISI (Turnip md §5.2):
+#     AArch64 + DYN + Bionic allowlist (libc.so; glibc/libc++_shared/libexpat yasağı)
+#     + vk_icdGetInstanceProcAddr sembol kontrolü + masaüstü WSI sızıntı yasağı +
+#     AdrenoTools kök dizin meta.json şema doğrulaması.
+# =============================================================================
+
+name: Build Official Upstream Turnip (Snapdragon 8 Gen 3 / Adreno 750)
 
 on:
   push:
@@ -7,80 +36,130 @@ on:
   workflow_dispatch:
     inputs:
       mesa_ref:
-        description: "Mesa Git kaynağı: 'stable' (otomatik en son kararlı tag) | 'main' (upstream devel) | doğrudan tag (örn: mesa-26.2.4)"
+        description: >-
+          Mesa kaynağı: 'stable' (varsayılan: en son resmî kararlı mesa-X.Y.Z etiketi,
+          dinamik tespit) | 'main' (bleeding-edge; Turnip md §10.2 '-devel taban' riski) |
+          doğrudan resmî etiket adı (örn. mesa-26.2.4)
         required: false
         default: "stable"
         type: string
       ndk_version:
-        description: "Resmî Android NDK sürümü (dl.google.com). Kanıtlanmış varsayılan: 'r26d'. Alternatifler: 'r27c', 'r29', 'r30'"
+        description: >-
+          Resmî Android NDK sürümü (dl.google.com). Varsayılan 'r26d' (Turnip md §6.4
+          kanıtlı, SHA256 doğrulamalı). Alternatif resmî sürümler: 'r29', 'r30'.
         required: false
         default: "r26d"
         type: string
+      cpu_tune:
+        description: >-
+          Mikro-mimari zamanlama profili (-mtune): 'cortex-a720' (varsayılan: 5× A720
+          performans kümesi, CMP+B.cc füzyonu dahil - CPU/GPU md §2.3) | 'cortex-x4'
+          (1× Prime 10-wide ROB=384 profili).
+        required: false
+        default: "cortex-a720"
+        type: choice
+        options:
+          - cortex-a720
+          - cortex-x4
       enable_lto:
-        description: "Link-Time Optimization (Thin LTO) aktif edilsin mi?"
+        description: >-
+          Clang/LLD Thin LTO (-Db_lto=true -Db_lto_mode=thin) etkinleştir.
+          Varsayılan: true (tu_* ve ir3_* modülleri arası çapraz inline optimizasyonu).
         required: false
         default: true
         type: boolean
       create_release:
-        description: "Derleme başarıyla tamamlandığında GitHub Release oluşturulsun mu?"
+        description: "Derleme sonunda GitHub Release oluşturulsun mu?"
         required: false
         default: false
         type: boolean
   schedule:
-    - cron: "0 4 * * 1" # Her Pazartesi 04:00 UTC
+    - cron: "0 6 * * 1" # Her Pazartesi 06:00 UTC
 
 permissions:
   contents: write
 
 concurrency:
-  group: turnip-a750-${{ github.ref }}
+  group: build-turnip-a750-${{ github.ref }}
   cancel-in-progress: true
 
 env:
+  # --- Yalnızca Resmî Veri Kaynakları (VERİ KAYNAĞI GÜVENLİĞİ Kuralı) --------
   MESA_REPO_URL: "https://gitlab.freedesktop.org/mesa/mesa.git"
-  NDK_BASE_URL: "https://dl.google.com/android/repository"
+  MESA_RELEASES_API: "https://gitlab.freedesktop.org/api/v4/projects/mesa%2Fmesa/releases?per_page=50"
+  NDK_URL_BASE: "https://dl.google.com/android/repository"
+  # Resmî Google android-ndk-r26d-linux.zip SHA256 özeti:
+  NDK_R26D_SHA256: "41fb2fa69bdb9bb62d02fd616fd5f8f91dc0ec66b0f8c1d7e0c2155f91060246"
+  # --- Platform ve Hedef Sabitleri (Turnip md §5.2, §6.4, §12.2 B4) ----------
+  # Not: NDK r26d üzerinde yamasız (android_ndk_compat.py olmadan) tam uyum için API 34:
   ANDROID_API_LEVEL: "34"
-  PLATFORM_SDK_VERSION: "34"
-  ADPKG_MIN_API: 29
-  TARGET_SOC_GPU: "Snapdragon 8 Gen 3 (SM8650) / Adreno 750 (a7xx_gen3, FD750, 0x43051401)"
+  ADPKG_MIN_API: "29"
+  TARGET_GPU_NAME: "Adreno 750 (SM8650 / a7xx_gen3 / FD750)"
 
 jobs:
-  build-turnip:
-    name: "Turnip Adreno 750 (Pure Upstream Mesa + Official NDK)"
+  build-turnip-a750:
+    name: "Turnip A750 (100% Pure Upstream Mesa + Official NDK)"
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
     steps:
-      - name: "1. Depoyu Checkout Et"
-        uses: actions/checkout@v4
-
-      - name: "2. Girdileri ve Parametreleri Yapılandır"
+      # -----------------------------------------------------------------------
+      # 1) Girdileri Çözümle ve Ortam Değişkenlerine Aktar
+      # -----------------------------------------------------------------------
+      - name: "1. Workflow Parametrelerini ve Güvenli Varsayılanları Ayarla"
         run: |
           set -euo pipefail
-          MESA_INPUT="${{ inputs.mesa_ref || 'stable' }}"
-          NDK_INPUT="${{ inputs.ndk_version || 'r26d' }}"
-          LTO_INPUT="${{ inputs.enable_lto != false && 'true' || 'false' }}"
-          
-          echo "RESOLVED_MESA_REF=${MESA_INPUT}" >> "$GITHUB_ENV"
-          echo "RESOLVED_NDK_VER=${NDK_INPUT}" >> "$GITHUB_ENV"
-          echo "RESOLVED_LTO=${LTO_INPUT}" >> "$GITHUB_ENV"
-          
-          echo "Mesa Kaynak Hedefi : ${MESA_INPUT}"
-          echo "Android NDK Sürümü : ${NDK_INPUT}"
-          echo "LTO Durumu         : ${LTO_INPUT}"
+          MESA_REF_IN="${{ inputs.mesa_ref || 'stable' }}"
+          NDK_VER_IN="${{ inputs.ndk_version || 'r26d' }}"
+          CPU_TUNE_IN="${{ inputs.cpu_tune || 'cortex-a720' }}"
+          ENABLE_LTO_IN="${{ inputs.enable_lto != false && 'true' || 'false' }}"
+          CREATE_REL_IN="${{ inputs.create_release == true && 'true' || 'false' }}"
 
-      - name: "3. Ubuntu & Python Derleme Bağımlılıklarını Kur"
+          # Güvenlik: cpu_tune yalnızca izin verilen ARMv9.2-A çekirdek adları olabilir
+          if [[ "${CPU_TUNE_IN}" != "cortex-a720" && "${CPU_TUNE_IN}" != "cortex-x4" ]]; then
+            echo "::error::Geçersiz cpu_tune değeri: ${CPU_TUNE_IN}"
+            exit 1
+          fi
+
+          {
+            echo "MESA_REF=${MESA_REF_IN}"
+            echo "NDK_VERSION=${NDK_VER_IN}"
+            echo "CPU_TUNE=${CPU_TUNE_IN}"
+            echo "ENABLE_LTO=${ENABLE_LTO_IN}"
+            echo "CREATE_RELEASE=${CREATE_REL_IN}"
+          } >> "${GITHUB_ENV}"
+
+          echo "Mesa Ref Hedefi : ${MESA_REF_IN}"
+          echo "NDK Sürümü      : ${NDK_VER_IN}"
+          echo "CPU Tune Hedefi : -march=armv9.2-a+crc+crypto -mtune=${CPU_TUNE_IN}"
+          echo "Thin LTO Durumu : ${ENABLE_LTO_IN}"
+
+      # -----------------------------------------------------------------------
+      # 2) Depo Checkout (Yalnızca Workflow Deposu — Mesa Kaynağı Değildir)
+      # -----------------------------------------------------------------------
+      - name: "2. Depoyu Checkout Et"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # -----------------------------------------------------------------------
+      # 3) Derleme ve Doğrulama Bağımlılıklarını Kur
+      # -----------------------------------------------------------------------
+      - name: "3. Derleme Bağımlılıklarını Kur (Ubuntu & Python Meson/Mako/PLY)"
         run: |
           set -euo pipefail
+          echo "::group::APT Paket Kurulumu"
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             build-essential \
+            binutils \
+            bison \
             ca-certificates \
             ccache \
             curl \
+            file \
             flex \
-            bison \
+            gettext \
             git \
+            glslang-tools \
             jq \
             ninja-build \
             pkg-config \
@@ -89,199 +168,225 @@ jobs:
             python3-setuptools \
             python3-wheel \
             unzip \
+            xz-utils \
             zip \
-            file \
-            binutils
-          
-          python3 -m pip install --quiet --upgrade pip
-          python3 -m pip install --quiet "meson>=1.4.0" "mako>=1.2.0" "pyyaml" "packaging"
-          
-          echo "Meson  : $(meson --version)"
-          echo "Ninja  : $(ninja --version)"
-          echo "ccache : $(ccache --version | head -n1)"
+            zstd
+          echo "::endgroup::"
 
-      - name: "4. Resmî Mesa Upstream Kararlı Sürümünü Dinamik Olarak Tespit Et"
+          echo "::group::Python Derleme Araçları (Meson, Mako, PyYAML, PLY)"
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "meson>=1.4.0" "mako>=1.2.0" "pyyaml" "ply" "packaging"
+          echo "Meson            : $(meson --version)"
+          echo "Ninja            : $(ninja --version)"
+          echo "glslangValidator : $(glslangValidator --version | head -n1)"
+          echo "jq               : $(jq --version)"
+          echo "::endgroup::"
+
+      # -----------------------------------------------------------------------
+      # 4) Dinamik Resmî Sürüm Tespiti (Git ls-remote + GitLab API Fallback)
+      #    Turnip md §1.4 & §10.2: -rc adaylarını dışla, kararlı mesa-X.Y.Z seç
+      # -----------------------------------------------------------------------
+      - name: "4. Resmî Mesa GitLab Deposundan Kararlı Sürümü ve SHA Değerini Tespit Et"
         id: resolve_mesa
         run: |
           set -euo pipefail
-          TAG=""
-          if [ "${RESOLVED_MESA_REF}" = "stable" ]; then
-            echo "GitLab API üzerinden en güncel kararlı Mesa sürümü aranıyor..."
-            API_URL="https://gitlab.freedesktop.org/api/v4/projects/mesa%2Fmesa/releases?per_page=50"
-            TAG="$(curl -fsSL --retry 3 --retry-delay 5 "${API_URL}" \
-              | jq -r '[.[].tag_name | select(test("^mesa-[0-9]+\\.[0-9]+\\.[0-9]+$"))] | .[0]' || true)"
-            
-            if [ -z "${TAG}" ] || [ "${TAG}" = "null" ]; then
-              echo "::warning::GitLab API yanıt vermedi veya boş döndü. 'git ls-remote' fallback devreye giriyor..."
-              TAG="$(git ls-remote --tags --refs "${MESA_REPO_URL}" \
-                | awk -F'refs/tags/' '{print $2}' \
-                | grep -E '^mesa-[0-9]+\.[0-9]+\.[0-9]+$' \
-                | sort -V \
-                | tail -n 1)"
+          echo "::group::Mesa Resmî Sürüm ve Commit SHA Tespiti"
+          RESOLVED_TAG=""
+
+          if [ "${MESA_REF}" = "stable" ]; then
+            echo "Yöntem 1: Resmî GitLab deposundan 'git ls-remote --tags' ile kararlı etiket aranıyor..."
+            RESOLVED_TAG=$(git ls-remote --tags --refs "${MESA_REPO_URL}" \
+              | awk -F'refs/tags/' '{print $2}' \
+              | grep -E '^mesa-[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V \
+              | tail -n 1 || true)
+
+            if [ -z "${RESOLVED_TAG}" ]; then
+              echo "::warning::git ls-remote yanıt vermedi, Yöntem 2 (Resmî GitLab Releases API) deneniyor..."
+              API_TAG=$(curl -fsSL --retry 3 --retry-delay 5 "${MESA_RELEASES_API}" \
+                | jq -r '[.[].tag_name | select(test("^(mesa-)?[0-9]+\\.[0-9]+\\.[0-9]+$"))] | .[0]' || true)
+              if [ -n "${API_TAG}" ] && [ "${API_TAG}" != "null" ]; then
+                if [[ "${API_TAG}" == mesa-* ]]; then
+                  RESOLVED_TAG="${API_TAG}"
+                else
+                  RESOLVED_TAG="mesa-${API_TAG}"
+                fi
+              fi
             fi
-          elif [ "${RESOLVED_MESA_REF}" = "main" ]; then
-            echo "::warning::'main' dalı seçildi. Bu geliştirme sürümüdür (Turnip md §10.2 '-devel taban' riski)."
-            TAG="main"
+          elif [ "${MESA_REF}" = "main" ]; then
+            echo "::warning::'main' dalı seçildi — Turnip md §10.2 uyarınca '-devel taban' regresyon riski mevcuttur."
+            RESOLVED_TAG="main"
           else
-            TAG="${RESOLVED_MESA_REF}"
-            echo "Kullanıcı tarafından sabitlenen Mesa ref: ${TAG}"
+            # Kullanıcı doğrudan '26.2.4' veya 'mesa-26.2.4' girdiyse normalize et
+            if [[ "${MESA_REF}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]]; then
+              RESOLVED_TAG="mesa-${MESA_REF}"
+            else
+              RESOLVED_TAG="${MESA_REF}"
+            fi
+            echo "Kullanıcı tarafından belirtilen resmî ref: ${RESOLVED_TAG}"
           fi
 
-          if [ -z "${TAG}" ]; then
-            echo "::error::Resmî Mesa deposundan geçerli bir sürüm/tag tespit edilemedi!"
+          if [ -z "${RESOLVED_TAG}" ]; then
+            echo "::error::Resmî Mesa deposundan geçerli bir sürüm/etiket tespit edilemedi!"
             exit 1
           fi
 
-          # Tag'in işaret ettiği doğrulanmış commit SHA'sını al
-          if [ "${TAG}" = "main" ]; then
-            RESOLVED_SHA="$(git ls-remote "${MESA_REPO_URL}" "refs/heads/main" | awk '{print $1}')"
+          # Etiketin veya dalın işaret ettiği gerçek commit SHA değerini resmî sunucudan doğrula
+          if [ "${RESOLVED_TAG}" = "main" ]; then
+            RESOLVED_SHA=$(git ls-remote "${MESA_REPO_URL}" "refs/heads/main" | awk '{print $1}')
           else
-            RESOLVED_SHA="$(git ls-remote "${MESA_REPO_URL}" "refs/tags/${TAG}^{}" | awk '{print $1}')"
+            RESOLVED_SHA=$(git ls-remote "${MESA_REPO_URL}" "refs/tags/${RESOLVED_TAG}^{}" | awk '{print $1}')
             if [ -z "${RESOLVED_SHA}" ]; then
-              RESOLVED_SHA="$(git ls-remote "${MESA_REPO_URL}" "refs/tags/${TAG}" | awk '{print $1}')"
+              RESOLVED_SHA=$(git ls-remote "${MESA_REPO_URL}" "refs/tags/${RESOLVED_TAG}" | awk '{print $1}')
             fi
           fi
 
           if [ -z "${RESOLVED_SHA}" ]; then
-            echo "::error::'${TAG}' için resmî depoda commit SHA bulunamadı!"
+            echo "::error::'${RESOLVED_TAG}' için resmî Mesa deposunda commit SHA doğrulanamadı!"
             exit 1
           fi
 
-          SHORT_SHA="${RESOLVED_SHA:0:10}"
-          CLEAN_VER="${TAG#mesa-}"
-          BUILD_DATE="$(date -u +"%Y%m%d-%H%M")"
-          BUILD_DATE_ISO="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          SHORT_SHA="${RESOLVED_SHA:0:12}"
+          VERSION_CLEAN="${RESOLVED_TAG#mesa-}"
+          BUILD_DATE=$(date -u +"%Y%m%d-%H%M")
+          BUILD_ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-          echo "mesa_tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "mesa_sha=${RESOLVED_SHA}" >> "$GITHUB_OUTPUT"
-          echo "mesa_short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "mesa_version=${CLEAN_VER}" >> "$GITHUB_OUTPUT"
-          echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
-          echo "build_date_iso=${BUILD_DATE_ISO}" >> "$GITHUB_OUTPUT"
+          {
+            echo "mesa_tag=${RESOLVED_TAG}"
+            echo "mesa_sha=${RESOLVED_SHA}"
+            echo "mesa_short_sha=${SHORT_SHA}"
+            echo "mesa_version=${VERSION_CLEAN}"
+            echo "build_date=${BUILD_DATE}"
+            echo "build_iso=${BUILD_ISO}"
+          } >> "${GITHUB_OUTPUT}"
 
-          echo "Tespit Edilen Mesa Kaynağı : ${TAG}"
-          echo "Doğrulanan Commit SHA       : ${RESOLVED_SHA}"
+          echo "Seçilen Resmî Ref      : ${RESOLVED_TAG}"
+          echo "Doğrulanan Commit SHA  : ${RESOLVED_SHA}"
+          echo "::endgroup::"
 
+      # -----------------------------------------------------------------------
+      # 5) Resmî Android NDK Önbelleği ve Kurulumu (dl.google.com)
+      # -----------------------------------------------------------------------
       - name: "5. Resmî Android NDK Önbelleğini Kontrol Et"
         id: cache_ndk
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          path: ${{ runner.temp }}/android-ndk-${{ env.RESOLVED_NDK_VER }}
-          key: ndk-${{ env.RESOLVED_NDK_VER }}
+          path: ~/android-ndk/android-ndk-${{ env.NDK_VERSION }}
+          key: official-android-ndk-linux-${{ env.NDK_VERSION }}-v1
 
-      - name: "6. Resmî Android NDK İndir ve Kur (dl.google.com)"
-        if: steps.cache_ndk.outputs.cache-hit != 'true'
+      - name: "6. Resmî Android NDK İndir, Doğrula ve Kur (dl.google.com)"
         run: |
           set -euo pipefail
-          NDK_ZIP="${RUNNER_TEMP}/android-ndk-${RESOLVED_NDK_VER}-linux.zip"
-          NDK_URL="${NDK_BASE_URL}/android-ndk-${RESOLVED_NDK_VER}-linux.zip"
-          
-          echo "Resmî Google NDK indiriliyor: ${NDK_URL}"
-          curl -fSL --retry 3 --retry-delay 5 -o "${NDK_ZIP}" "${NDK_URL}"
-          
-          echo "NDK Arşivi açılıyor..."
-          unzip -q "${NDK_ZIP}" -d "${RUNNER_TEMP}"
-          rm -f "${NDK_ZIP}"
+          echo "::group::Resmî Android NDK (${NDK_VERSION}) Kurulumu ve Doğrulaması"
+          NDK_ROOT="${HOME}/android-ndk"
+          NDK_DIR="${NDK_ROOT}/android-ndk-${NDK_VERSION}"
+          mkdir -p "${NDK_ROOT}"
 
-      - name: "7. NDK Yolu ve Doğrulaması"
-        run: |
-          set -euo pipefail
-          NDK_PATH="${RUNNER_TEMP}/android-ndk-${RESOLVED_NDK_VER}"
-          if [ ! -f "${NDK_PATH}/source.properties" ]; then
-            echo "::error::Geçersiz NDK dizini: ${NDK_PATH}"
+          if [ ! -d "${NDK_DIR}" ]; then
+            NDK_ZIP="${RUNNER_TEMP}/android-ndk-${NDK_VERSION}-linux.zip"
+            NDK_URL="${NDK_URL_BASE}/android-ndk-${NDK_VERSION}-linux.zip"
+            echo "Resmî Google kanalından indiriliyor: ${NDK_URL}"
+            curl -fSL --retry 3 --retry-delay 5 -o "${NDK_ZIP}" "${NDK_URL}"
+
+            ACTUAL_SHA256=$(sha256sum "${NDK_ZIP}" | awk '{print $1}')
+            echo "İndirilen NDK SHA256 : ${ACTUAL_SHA256}"
+
+            if [ "${NDK_VERSION}" = "r26d" ]; then
+              if [ "${ACTUAL_SHA256}" != "${NDK_R26D_SHA256}" ]; then
+                echo "::error::NDK r26d SHA256 doğrulaması BAŞARISIZ! Beklenen: ${NDK_R26D_SHA256}, Bulunan: ${ACTUAL_SHA256}"
+                exit 1
+              fi
+              echo "NDK r26d SHA256 kriptografik doğrulaması başarılı."
+            fi
+
+            unzip -q "${NDK_ZIP}" -d "${NDK_ROOT}"
+            rm -f "${NDK_ZIP}"
+          else
+            echo "NDK önbellekten yüklendi: ${NDK_DIR}"
+          fi
+
+          if [ ! -f "${NDK_DIR}/source.properties" ]; then
+            echo "::error::NDK source.properties bulunamadı: ${NDK_DIR}"
             exit 1
           fi
-          echo "NDK Doğrulandı:"
-          grep "^Pkg.Revision" "${NDK_PATH}/source.properties" || true
-          echo "NDK_ROOT=${NDK_PATH}" >> "$GITHUB_ENV"
+          grep "^Pkg.Revision" "${NDK_DIR}/source.properties" || true
+          echo "NDK_DIR=${NDK_DIR}" >> "${GITHUB_ENV}"
+          echo "::endgroup::"
 
-      - name: "8. ccache Derleyici Önbelleğini Hazırla"
-        uses: actions/cache@v4
+      # -----------------------------------------------------------------------
+      # 7) Derleyici Nesne Önbelleği (ccache) ve Meson PackageCache
+      # -----------------------------------------------------------------------
+      - name: "7. Derleyici Önbelleğini (ccache) Yükle"
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.ccache
-          key: ccache-turnip-a750-${{ env.RESOLVED_NDK_VER }}-${{ steps.resolve_mesa.outputs.mesa_tag }}-${{ github.run_id }}
+          key: ccache-turnip-a750-${{ env.NDK_VERSION }}-${{ env.CPU_TUNE }}-lto-${{ env.ENABLE_LTO }}-${{ steps.resolve_mesa.outputs.mesa_tag }}-${{ github.run_id }}
           restore-keys: |
-            ccache-turnip-a750-${{ env.RESOLVED_NDK_VER }}-${{ steps.resolve_mesa.outputs.mesa_tag }}-
-            ccache-turnip-a750-${{ env.RESOLVED_NDK_VER }}-
+            ccache-turnip-a750-${{ env.NDK_VERSION }}-${{ env.CPU_TUNE }}-lto-${{ env.ENABLE_LTO }}-${{ steps.resolve_mesa.outputs.mesa_tag }}-
+            ccache-turnip-a750-${{ env.NDK_VERSION }}-${{ env.CPU_TUNE }}-
 
-      - name: "9. Resmî Mesa Kaynak Kodunu İndir (Saf Upstream)"
+      # -----------------------------------------------------------------------
+      # 8) Resmî Mesa Kaynak Kodu İndirme ve Kaynak Saflığı (Purity) Denetimi
+      # -----------------------------------------------------------------------
+      - name: "8. Resmî Mesa Kaynak Kodunu İndir ve Saflık Denetimi Yap"
         run: |
           set -euo pipefail
-          rm -rf "${RUNNER_TEMP}/mesa-src"
+          echo "::group::Mesa Kaynak Kodu Klonlama (Saf Upstream)"
           git clone --depth 1 --branch "${{ steps.resolve_mesa.outputs.mesa_tag }}" \
             "${MESA_REPO_URL}" "${RUNNER_TEMP}/mesa-src"
-          
           cd "${RUNNER_TEMP}/mesa-src"
-          CLONED_SHA="$(git rev-parse HEAD)"
-          echo "Klonlanan Commit SHA: ${CLONED_SHA}"
-          
-          # Kaynak saflığı denetimi
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "::error::Klonlanan kaynak ağacı temiz değil! Kaynak saflığı ihlali."
+
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "${HEAD_SHA}" != "${{ steps.resolve_mesa.outputs.mesa_sha }}" ]; then
+            echo "::error::Klonlanan HEAD SHA (${HEAD_SHA}) beklenen SHA (${{ steps.resolve_mesa.outputs.mesa_sha }}) ile eşleşmiyor!"
             exit 1
           fi
-          echo "Kaynak saflığı doğrulandı: 0 yama, saf upstream."
 
-      - name: "10. Kendi Kendine Yeten Meson Cross-File Üret"
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Mesa kaynak ağacı kirli! Kaynak saflığı bozulmuş."
+            git status --porcelain
+            exit 1
+          fi
+          echo "Kaynak Saflığı Doğrulandı: 0 yama, temiz çalışma ağacı (${HEAD_SHA})"
+          echo "::endgroup::"
+
+      # -----------------------------------------------------------------------
+      # 9) Meson Cross-File Oluşturma
+      #    CPU/GPU md §2.1–§2.3: ARMv9.2-A + TuneA720/TuneX4
+      #    Turnip md §6.4: Exception/Unwind kapatma + Statik C++ Runtime + GC Sections
+      # -----------------------------------------------------------------------
+      - name: "9. Meson Cross-File Oluştur (SM8650 ARMv9.2-A + Yamasız Optimizasyonlar)"
         run: |
           set -euo pipefail
-          NDK_BIN="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          CLANG_CC="${NDK_BIN}/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
-          CLANG_CXX="${NDK_BIN}/aarch64-linux-android${ANDROID_API_LEVEL}-clang++"
-          LLVM_AR="${NDK_BIN}/llvm-ar"
-          LLVM_STRIP="${NDK_BIN}/llvm-strip"
-          
-          if [ ! -x "${CLANG_CC}" ] || [ ! -x "${CLANG_CXX}" ]; then
-            echo "::error::Hedef Clang derleyicisi bulunamadı: ${CLANG_CC}"
+          echo "::group::Meson Cross-File Yapılandırması"
+          NDK_TOOLCHAIN="${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CLANG_BIN="${NDK_TOOLCHAIN}/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
+          CLANGXX_BIN="${NDK_TOOLCHAIN}/aarch64-linux-android${ANDROID_API_LEVEL}-clang++"
+
+          if [ ! -x "${CLANG_BIN}" ]; then
+            echo "::error::NDK Clang derleyicisi bulunamadı: ${CLANG_BIN}"
             exit 1
           fi
 
-          ccache --set-config=max_size=2G
+          ccache --set-config=max_size=1G
           ccache --set-config=compression=true
           ccache --zero-stats
 
-          CROSS_FILE="${RUNNER_TEMP}/cross-android-aarch64.ini"
-          cat <<EOF > "${CROSS_FILE}"
+          cat <<EOF > "${RUNNER_TEMP}/android-aarch64-sm8650.ini"
           [binaries]
-          c = ['ccache', '${CLANG_CC}']
-          cpp = ['ccache', '${CLANG_CXX}']
-          ar = '${LLVM_AR}'
-          strip = '${LLVM_STRIP}'
+          c = ['ccache', '${CLANG_BIN}']
+          cpp = ['ccache', '${CLANGXX_BIN}']
+          ar = '${NDK_TOOLCHAIN}/llvm-ar'
+          strip = '${NDK_TOOLCHAIN}/llvm-strip'
           c_ld = 'lld'
           cpp_ld = 'lld'
-          pkgconfig = 'pkg-config'
+          pkgconfig = ['pkg-config']
 
           [built-in options]
-          c_args = [
-            '-march=armv9.2-a+crc+crypto',
-            '-mtune=cortex-a720',
-            '-ffunction-sections',
-            '-fdata-sections',
-            '-fno-unwind-tables',
-            '-fno-asynchronous-unwind-tables',
-            '-D__ANDROID__'
-          ]
-          cpp_args = [
-            '-march=armv9.2-a+crc+crypto',
-            '-mtune=cortex-a720',
-            '-ffunction-sections',
-            '-fdata-sections',
-            '-fno-exceptions',
-            '-fno-unwind-tables',
-            '-fno-asynchronous-unwind-tables',
-            '-D__ANDROID__'
-          ]
-          c_link_args = [
-            '-fuse-ld=lld',
-            '-Wl,--gc-sections',
-            '-Wl,-O2'
-          ]
-          cpp_link_args = [
-            '-fuse-ld=lld',
-            '-Wl,--gc-sections',
-            '-Wl,-O2',
-            '-static-libstdc++'
-          ]
+          c_args = ['-march=armv9.2-a+crc+crypto', '-mtune=${CPU_TUNE}', '-D__ANDROID__', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-ffunction-sections', '-fdata-sections']
+          cpp_args = ['-march=armv9.2-a+crc+crypto', '-mtune=${CPU_TUNE}', '-D__ANDROID__', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-ffunction-sections', '-fdata-sections']
+          c_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections', '-Wl,-O2']
+          cpp_link_args = ['-fuse-ld=lld', '-static-libstdc++', '-Wl,--gc-sections', '-Wl,-O2']
 
           [host_machine]
           system = 'android'
@@ -290,26 +395,35 @@ jobs:
           endian = 'little'
           EOF
 
-          echo "CROSS_FILE_PATH=${CROSS_FILE}" >> "$GITHUB_ENV"
-          cat "${CROSS_FILE}"
+          cat "${RUNNER_TEMP}/android-aarch64-sm8650.ini"
+          echo "::endgroup::"
 
-      - name: "11. Meson ile Mesa/Turnip Yapılandır"
+      # -----------------------------------------------------------------------
+      # 10) Meson Setup ve Ninja Derlemesi
+      #     Turnip md §6.4 kanıtlanmış çekirdek + gereksiz tüm bileşenlerin kapatılması
+      # -----------------------------------------------------------------------
+      - name: "10. Meson ile Turnip (Freedreno KGSL) Yapılandır ve Derle"
         run: |
           set -euo pipefail
           cd "${RUNNER_TEMP}/mesa-src"
-          
-          BUILD_DIR="${RUNNER_TEMP}/mesa-build"
-          rm -rf "${BUILD_DIR}"
 
-          meson setup "${BUILD_DIR}" \
-            --cross-file "${CROSS_FILE_PATH}" \
+          LTO_FLAGS=()
+          if [ "${ENABLE_LTO}" = "true" ]; then
+            LTO_FLAGS=(-Db_lto=true -Db_lto_mode=thin)
+          else
+            LTO_FLAGS=(-Db_lto=false)
+          fi
+
+          echo "::group::Meson Setup"
+          meson setup "${RUNNER_TEMP}/mesa-build" \
+            --cross-file "${RUNNER_TEMP}/android-aarch64-sm8650.ini" \
             --wrap-mode=nofallback \
             -Dbuildtype=release \
             -Db_ndebug=true \
             -Dstrip=true \
-            -Db_lto=${RESOLVED_LTO} \
+            "${LTO_FLAGS[@]}" \
             -Dplatforms=android \
-            -Dplatform-sdk-version=${PLATFORM_SDK_VERSION} \
+            -Dplatform-sdk-version=${ANDROID_API_LEVEL} \
             -Dandroid-stub=true \
             -Dandroid-libbacktrace=disabled \
             -Dgallium-drivers= \
@@ -323,219 +437,224 @@ jobs:
             -Dgles2=disabled \
             -Dglx=disabled \
             -Dllvm=disabled \
-            -Dshared-glapi=disabled \
             -Dxmlconfig=disabled \
             -Dzstd=disabled \
             -Dvalgrind=disabled \
             -Dvideo-codecs=
+          meson configure "${RUNNER_TEMP}/mesa-build" > "${RUNNER_TEMP}/meson-config.txt"
+          echo "::endgroup::"
 
-          echo "Yapılandırma sonrası kaynak saflığı kontrol ediliyor..."
+          echo "::group::Derleme Öncesi İkinci Kaynak Saflığı Kontrolü"
           if [ -n "$(git status --porcelain)" ]; then
-            echo "::error::Meson yapılandırması sırasında Mesa kaynak ağacı kirlendi!"
+            echo "::error::Meson yapılandırması sonrasında Mesa kaynak ağacında değişiklik tespit edildi!"
             git status --porcelain
             exit 1
           fi
-          echo "Kaynak saflığı onaylandı."
-          echo "MESA_BUILD_DIR=${BUILD_DIR}" >> "$GITHUB_ENV"
+          echo "Kaynak ağacı %100 temiz."
+          echo "::endgroup::"
 
-      - name: "12. Turnip Vulkan Sürücüsünü Derle"
-        run: |
-          set -euo pipefail
-          echo "Ninja ile libvulkan_freedreno.so hedeflenerek derleniyor..."
-          ninja -C "${MESA_BUILD_DIR}" src/freedreno/vulkan/libvulkan_freedreno.so
-          
-          echo "ccache İstatistikleri:"
+          echo "::group::Ninja Derlemesi (libvulkan_freedreno.so)"
+          ninja -C "${RUNNER_TEMP}/mesa-build" src/freedreno/vulkan/libvulkan_freedreno.so
           ccache --show-stats
+          echo "::endgroup::"
 
-      - name: "13. İkili Dosya Doğrulaması (AArch64 + DYN + Bionic + ICD)"
+      # -----------------------------------------------------------------------
+      # 11) Sıkı İkili Dosya (ELF / Bionic Allowlist / Vulkan ICD Sembol) Kapısı
+      #     Turnip md §5.2 paket doğrulama kriterleri
+      # -----------------------------------------------------------------------
+      - name: "11. İkili Dosya (ELF / Bionic / Vulkan Sembol) Doğrulaması Yap"
         run: |
           set -euo pipefail
-          SO_FILE="${MESA_BUILD_DIR}/src/freedreno/vulkan/libvulkan_freedreno.so"
-          
-          if [ ! -f "${SO_FILE}" ]; then
-            echo "::error::Derlenen sürücü dosyası (libvulkan_freedreno.so) bulunamadı!"
+          echo "::group::Binary Doğrulama Kapısı (readelf & file)"
+          SO_PATH="${RUNNER_TEMP}/mesa-build/src/freedreno/vulkan/libvulkan_freedreno.so"
+          if [ ! -f "${SO_PATH}" ]; then
+            echo "::error::libvulkan_freedreno.so üretilmedi!"
             exit 1
           fi
 
-          echo "Dosya Boyutu: $(stat -c '%s bayt' "${SO_FILE}")"
-          FILE_INFO="$(file -b "${SO_FILE}")"
-          echo "file Çıktısı: ${FILE_INFO}"
+          echo "Dosya Bilgisi : $(file -b "${SO_PATH}")"
+          echo "Dosya Boyutu  : $(stat -c '%s bayt' "${SO_PATH}")"
 
-          # 1. Mimari Kontrolü
-          if ! readelf -h "${SO_FILE}" | grep -Eq 'Machine:[[:space:]]*AArch64'; then
-            echo "::error::Mimari doğrulaması BAŞARISIZ: AArch64 değil!"
+          ELF_HEADER=$(readelf -h "${SO_PATH}")
+          echo "${ELF_HEADER}"
+
+          if ! echo "${ELF_HEADER}" | grep -Eq "Class:[[:space:]]*ELF64"; then
+            echo "::error::Doğrulama Hatası [1/6]: ELF Class ELF64 değil!"
             exit 1
           fi
 
-          # 2. ELF Tip Kontrolü
-          if ! readelf -h "${SO_FILE}" | grep -Eq 'Type:[[:space:]]*DYN'; then
-            echo "::error::ELF tipi doğrulaması BAŞARISIZ: DYN (Shared library) değil!"
+          if ! echo "${ELF_HEADER}" | grep -Eq "Machine:[[:space:]]*AArch64"; then
+            echo "::error::Doğrulama Hatası [2/6]: ELF Machine AArch64 değil!"
             exit 1
           fi
 
-          # 3. Dinamik Bağımlılık Kontrolü (Bionic / Android)
-          NEEDED_LIBS="$(readelf -d "${SO_FILE}" | awk -F'[][]' '/\(NEEDED\)/ {print $2}')"
-          echo "Bağlanan Dinamik Kütüphaneler:"
+          if ! echo "${ELF_HEADER}" | grep -Eq "Type:[[:space:]]*DYN"; then
+            echo "::error::Doğrulama Hatası [3/6]: ELF Type DYN (paylaşımlı kütüphane) değil!"
+            exit 1
+          fi
+
+          DYN_SECTION=$(readelf -d "${SO_PATH}")
+          echo "${DYN_SECTION}"
+
+          NEEDED_LIBS=$(echo "${DYN_SECTION}" | awk -F'[][]' '/\(NEEDED\)/ {print $2}')
+          echo "Bağlanan Dinamik Kütüphaneler (NEEDED):"
           echo "${NEEDED_LIBS}"
 
           if ! echo "${NEEDED_LIBS}" | grep -qx "libc.so"; then
-            echo "::error::Bionic libc.so dinamik bağımlılığı bulunamadı!"
+            echo "::error::Doğrulama Hatası [4/6]: Android bionic 'libc.so' bağımlılığı bulunamadı!"
             exit 1
           fi
 
-          if echo "${NEEDED_LIBS}" | grep -Eq 'libc\.so\.6|libstdc\+\+\.so\.6|libgcc_s\.so\.1|libc\+\+_shared\.so'; then
-            echo "::error::Masaüstü glibc veya paylaşımlı C++ runtime bağımlılığı tespit edildi!"
-            exit 1
-          fi
-
-          # İzin verilen Android kütüphaneleri dışındaki harici bağımlılıkları engelle
+          # Yalnızca izin verilen Android Bionic / NDK stub kütüphanelerine bağlandığını doğrula
+          # (glibc libc.so.6, paylaşımlı libc++_shared.so, libstdc++.so.6 veya libexpat.so sızamaz)
           ALLOWED_REGEX='^(libc\.so|libm\.so|libdl\.so|liblog\.so|libnativewindow\.so|libsync\.so|libandroid\.so)$'
           for lib in ${NEEDED_LIBS}; do
             if ! echo "${lib}" | grep -Eq "${ALLOWED_REGEX}"; then
-              echo "::error::İzin verilmeyen harici dinamik kütüphane saptandı: ${lib}"
+              echo "::error::Doğrulama Hatası [5/6]: İzin verilmeyen harici kütüphane bağımlılığı: ${lib}"
               exit 1
             fi
           done
 
-          # 4. Masaüstü WSI Sembol Sızıntısı Kontrolü
-          DYN_SYMS="$(readelf --dyn-syms -W "${SO_FILE}")"
+          # Vulkan ICD giriş noktası sembolü var mı ve masaüstü Linux WSI sembolleri sızmış mı kontrol et
+          DYN_SYMS=$(readelf --dyn-syms -W "${SO_PATH}")
+          if ! echo "${DYN_SYMS}" | grep -qw "vk_icdGetInstanceProcAddr"; then
+            echo "::error::Doğrulama Hatası [6/6]: Vulkan ICD giriş sembolü (vk_icdGetInstanceProcAddr) bulunamadı!"
+            exit 1
+          fi
+
           if echo "${DYN_SYMS}" | grep -Eq "vkCreateWaylandSurfaceKHR|vkCreateXcbSurfaceKHR"; then
-            echo "::error::Masaüstü Linux (Wayland/X11) WSI sembolleri tespit edildi!"
+            echo "::error::Doğrulama Hatası: Masaüstü Linux WSI (Wayland/XCB) sembolleri Android sürücüsüne sızmış!"
             exit 1
           fi
 
-          # 5. Vulkan ICD Giriş Sembolü Kontrolü
-          if ! echo "${DYN_SYMS}" | grep -q "vk_icdGetInstanceProcAddr"; then
-            echo "::error::Vulkan ICD zorunlu sembolü (vk_icdGetInstanceProcAddr) bulunamadı!"
-            exit 1
-          fi
+          echo "Android Bionic Notu: $(readelf -n "${SO_PATH}" | grep -i android | head -n2 || echo 'standart')"
+          echo "Binary doğrulama kapısı TAMAM (6/6 kontrol başarıyla geçti)."
+          echo "::endgroup::"
 
-          echo "Tüm İkili Dosya (Binary) Güvenlik ve Uyumluluk Doğrulamaları Başarıyla Geçti."
-          echo "VALIDATED_SO=${SO_FILE}" >> "$GITHUB_ENV"
-
-      - name: "14. AdrenoTools Uyumlu Paketi Oluştur ve Doğrula"
+      # -----------------------------------------------------------------------
+      # 12) AdrenoTools (.adpkg / .zip) Paketleme ve Şema Doğrulaması
+      #     Turnip md §5.2: meta.json ve libvulkan_freedreno.so zip kökünde olmalı
+      # -----------------------------------------------------------------------
+      - name: "12. AdrenoTools (.adpkg / .zip) Paketini Oluştur ve Doğrula"
         id: package_driver
         run: |
           set -euo pipefail
-          DIST_DIR="${RUNNER_TEMP}/dist_package"
-          mkdir -p "${DIST_DIR}"
+          echo "::group::AdrenoTools Paketleme ve meta.json Doğrulaması"
+          PKG_DIR="${RUNNER_TEMP}/adpkg-bundle"
+          OUT_DIR="${RUNNER_TEMP}/artifacts"
+          mkdir -p "${PKG_DIR}" "${OUT_DIR}"
 
-          cp "${VALIDATED_SO}" "${DIST_DIR}/libvulkan_freedreno.so"
+          SO_PATH="${RUNNER_TEMP}/mesa-build/src/freedreno/vulkan/libvulkan_freedreno.so"
+          cp "${SO_PATH}" "${PKG_DIR}/libvulkan_freedreno.so"
 
           MESA_VER="${{ steps.resolve_mesa.outputs.mesa_version }}"
           MESA_TAG="${{ steps.resolve_mesa.outputs.mesa_tag }}"
           MESA_SHA="${{ steps.resolve_mesa.outputs.mesa_sha }}"
           SHORT_SHA="${{ steps.resolve_mesa.outputs.mesa_short_sha }}"
           BUILD_DATE="${{ steps.resolve_mesa.outputs.build_date }}"
-          BUILD_DATE_ISO="${{ steps.resolve_mesa.outputs.build_date_iso }}"
+          BUILD_ISO="${{ steps.resolve_mesa.outputs.build_iso }}"
+          NDK_REV=$(grep '^Pkg.Revision' "${NDK_DIR}/source.properties" | cut -d= -f2 | tr -d ' ' || echo "${NDK_VERSION}")
 
-          # meta.json oluştur
-          cat <<EOF > "${DIST_DIR}/meta.json"
+          cat <<EOF > "${PKG_DIR}/meta.json"
           {
             "schemaVersion": 1,
-            "name": "Turnip Adreno 750 (Mesa ${MESA_VER})",
-            "description": "100% Unpatched Upstream Mesa Turnip for Snapdragon 8 Gen 3 (Adreno 750). Built from official upstream ${MESA_TAG} (${SHORT_SHA}) on ${BUILD_DATE_ISO}.",
-            "author": "CI Automated Official Build",
+            "name": "Turnip Mesa ${MESA_VER} (Official Upstream - A750)",
+            "description": "100% Unpatched Official Mesa (${MESA_TAG} @ ${SHORT_SHA}) built on ${BUILD_ISO} for ${TARGET_GPU_NAME}",
+            "author": "Mesa Freedreno Upstream (Automated Pure CI)",
             "packageVersion": "1",
             "vendor": "Mesa",
-            "driverVersion": "${MESA_VER} (${SHORT_SHA})",
+            "driverVersion": "Mesa ${MESA_VER} (${SHORT_SHA})",
             "minApi": ${ADPKG_MIN_API},
             "libraryName": "libvulkan_freedreno.so"
           }
           EOF
 
-          # meta.json JSON şemasını doğrula
-          jq -e '.schemaVersion == 1 and .minApi == 29 and .libraryName == "libvulkan_freedreno.so"' "${DIST_DIR}/meta.json" > /dev/null
+          # meta.json şema doğrulaması (Turnip md §5.2)
+          jq -e '.schemaVersion == 1 and .vendor == "Mesa" and .minApi == 29 and .libraryName == "libvulkan_freedreno.so"' \
+            "${PKG_DIR}/meta.json" > /dev/null
 
-          # Tam izlenebilirlik için BUILD-INFO.txt oluştur
-          cat <<EOF > "${DIST_DIR}/BUILD-INFO.txt"
-          ================================================================================
-          TURNIP VULKAN SÜRÜCÜSÜ DERLEME BİLGİSİ
-          ================================================================================
-          Hedef Platform    : ${TARGET_SOC_GPU}
-          Mesa Kaynağı      : ${MESA_REPO_URL}
-          Mesa Etiketi/Dal  : ${MESA_TAG}
-          Mesa Commit SHA   : ${MESA_SHA}
-          Android NDK       : ${RESOLVED_NDK_VER} (dl.google.com resmî dağıtımı)
-          Hedef API Seviyesi: Android API ${ANDROID_API_LEVEL} (minApi ${ADPKG_MIN_API})
-          Derleyici Hedefi  : -march=armv9.2-a+crc+crypto -mtune=cortex-a720
-          Optimizasyonlar   : -O3, NDEBUG, LTO=${RESOLVED_LTO}, dead-code gc-sections, lld -O2
-          Kaynak Saflığı    : %100 Saf Resmî Upstream (Uygulanan Yama Sayısı: 0)
-          Runtime Ayarları  : Gömülmedi (Tamamen upstream sürücü varsayılanları)
-          Derleme Tarihi UTC: ${BUILD_DATE_ISO}
-          GitHub Run ID     : ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-          ================================================================================
+          cat <<EOF > "${PKG_DIR}/BUILD_INFO.txt"
+          Driver           : Mesa Turnip (libvulkan_freedreno.so)
+          Target SoC / GPU : Qualcomm Snapdragon 8 Gen 3 (SM8650) / Adreno 750 (FD750, Chip-ID 0x43051401)
+          Upstream Repo    : ${MESA_REPO_URL}
+          Upstream Tag/Ref : ${MESA_TAG}
+          Upstream Commit  : ${MESA_SHA}
+          Build Date (UTC) : ${BUILD_ISO}
+          Android NDK      : ${NDK_VERSION} (Pkg.Revision ${NDK_REV}, API ${ANDROID_API_LEVEL}, minApi ${ADPKG_MIN_API})
+          CPU ISA & Tune   : -march=armv9.2-a+crc+crypto -mtune=${CPU_TUNE}
+          Compiler & LTO   : Release (-O3), NDEBUG, Thin LTO=${ENABLE_LTO}, --gc-sections, -Wl,-O2, -static-libstdc++
+          Source Purity    : 100% Pure Official Upstream (0 patches applied, 0 runtime env embedded)
+          Workflow Run     : ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           EOF
 
-          ARTIFACT_BASE="Turnip-Upstream-${MESA_VER}-${SHORT_SHA}-${BUILD_DATE}-SM8650-A750"
-          ZIP_FILE="${RUNNER_TEMP}/${ARTIFACT_BASE}.adpkg.zip"
+          cp "${PKG_DIR}/BUILD_INFO.txt" "${OUT_DIR}/BUILD_INFO.txt"
 
-          cd "${DIST_DIR}"
-          zip -9 -r "${ZIP_FILE}" libvulkan_freedreno.so meta.json BUILD-INFO.txt
-          sha256sum "${ZIP_FILE}" > "${ZIP_FILE}.sha256"
+          ARTIFACT_BASENAME="Turnip-Upstream-${MESA_VER}-${SHORT_SHA}-${BUILD_DATE}-SM8650-A750"
+          ZIP_NAME="${ARTIFACT_BASENAME}.adpkg.zip"
+          ZIP_PATH="${OUT_DIR}/${ZIP_NAME}"
 
-          echo "artifact_name=${ARTIFACT_BASE}" >> "$GITHUB_OUTPUT"
-          echo "zip_path=${ZIP_FILE}" >> "$GITHUB_OUTPUT"
-          echo "sha256_path=${ZIP_FILE}.sha256" >> "$GITHUB_OUTPUT"
+          # Zip kök dizininde (alt klasör olmadan) paketle — libadrenotools standardı
+          ( cd "${PKG_DIR}" && zip -9 -q "${ZIP_PATH}" libvulkan_freedreno.so meta.json BUILD_INFO.txt )
+          ( cd "${OUT_DIR}" && sha256sum "${ZIP_NAME}" > "${ZIP_NAME}.sha256" )
 
-          echo "Paket başarıyla oluşturuldu:"
-          ls -lh "${ZIP_FILE}" "${ZIP_FILE}.sha256"
+          echo "artifact_basename=${ARTIFACT_BASENAME}" >> "${GITHUB_OUTPUT}"
+          echo "zip_path=${ZIP_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "sha256_path=${ZIP_PATH}.sha256" >> "${GITHUB_OUTPUT}"
 
-      - name: "15. Derleme Paketini Artifact Olarak Yükle"
-        uses: actions/upload-artifact@v4
+          echo "--- Üretilen Dosyalar ---"
+          ls -lh "${OUT_DIR}"
+          echo "--- Zip Kök İçeriği ---"
+          unzip -l "${ZIP_PATH}"
+          echo "::endgroup::"
+
+      # -----------------------------------------------------------------------
+      # 13) Artifact Yükleme
+      # -----------------------------------------------------------------------
+      - name: "13. Paketi GitHub Actions Artifact Olarak Yükle"
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ steps.package_driver.outputs.artifact_name }}
+          name: ${{ steps.package_driver.outputs.artifact_basename }}
           path: |
             ${{ steps.package_driver.outputs.zip_path }}
             ${{ steps.package_driver.outputs.sha256_path }}
-          retention-days: 30
+            ${{ runner.temp }}/artifacts/BUILD_INFO.txt
           if-no-files-found: error
+          retention-days: 30
 
-      - name: "16. Opsiyonel GitHub Release Oluştur"
-        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.create_release == true) }}
+      # -----------------------------------------------------------------------
+      # 14) Opsiyonel GitHub Release (Yalnızca İstenirse)
+      # -----------------------------------------------------------------------
+      - name: "14. Opsiyonel GitHub Release Oluştur"
+        if: ${{ github.event_name == 'workflow_dispatch' && env.CREATE_RELEASE == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          RELEASE_TAG="v${{ steps.resolve_mesa.outputs.mesa_version }}-${{ steps.resolve_mesa.outputs.mesa_short_sha }}"
-          
-          # Aynı tag varsa kontrol et, yoksa oluştur
-          if ! gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            gh release create "${RELEASE_TAG}" \
-              "${{ steps.package_driver.outputs.zip_path }}" \
-              "${{ steps.package_driver.outputs.sha256_path }}" \
-              --title "Turnip Adreno 750 (Mesa ${{ steps.resolve_mesa.outputs.mesa_version }})" \
-              --notes "### Mesa Turnip Adreno 750 (Snapdragon 8 Gen 3) Resmî Upstream Derlemesi
-              
-              - **Mesa Upstream Tag**: \`${{ steps.resolve_mesa.outputs.mesa_tag }}\`
-              - **Commit SHA**: \`${{ steps.resolve_mesa.outputs.mesa_sha }}\`
-              - **Kaynak Saflığı**: %100 Resmî Upstream, Sıfır Yama
-              - **NDK Sürümü**: \`${{ env.RESOLVED_NDK_VER }}\` (Android API ${{ env.ANDROID_API_LEVEL }})
-              - **CPU Optimizasyonu**: \`-march=armv9.2-a+crc+crypto -mtune=cortex-a720\`
-              - **Derleme Tarihi**: \`${{ steps.resolve_mesa.outputs.build_date_iso }}\`"
-          else
-            gh release upload "${RELEASE_TAG}" \
-              "${{ steps.package_driver.outputs.zip_path }}" \
-              "${{ steps.package_driver.outputs.sha256_path }}" \
-              --clobber
-          fi
+          REL_TAG="turnip-a750-${{ steps.resolve_mesa.outputs.mesa_tag }}-${{ steps.resolve_mesa.outputs.build_date }}"
+          gh release create "${REL_TAG}" \
+            "${{ steps.package_driver.outputs.zip_path }}" \
+            "${{ steps.package_driver.outputs.sha256_path }}" \
+            "${{ runner.temp }}/artifacts/BUILD_INFO.txt" \
+            --title "Turnip ${REL_TAG} (Pure Upstream A750)" \
+            --notes "100% official unpatched Mesa upstream build from \`${{ steps.resolve_mesa.outputs.mesa_tag }}\` (\`${{ steps.resolve_mesa.outputs.mesa_sha }}\`) built on \`${{ steps.resolve_mesa.outputs.build_iso }}\` for Snapdragon 8 Gen 3 (Adreno 750)."
 
-      - name: "17. GitHub Step Summary Raporu Oluştur"
+      # -----------------------------------------------------------------------
+      # 15) GitHub Step Summary (Her Koşulda Ayrıştırılabilir Özet Tablo)
+      # -----------------------------------------------------------------------
+      - name: "15. GitHub İş Özeti (Step Summary)"
         if: always()
         run: |
           {
-            echo "## 🚀 Turnip Adreno 750 Resmî Upstream Derleme Özeti"
+            echo "## Turnip (Adreno 750 / SM8650) — Saf Upstream Derleme Özeti"
             echo ""
             echo "| Parametre | Değer |"
             echo "| :--- | :--- |"
-            echo "| **Hedef Donanım** | Snapdragon 8 Gen 3 / Adreno 750 (\`a7xx_gen3\`, \`0x43051401\`) |"
-            echo "| **Mesa Kaynağı** | Resmî Upstream GitLab (\`${{ steps.resolve_mesa.outputs.mesa_tag || 'Tespit Edilemedi' }}\`) |"
-            echo "| **Commit SHA** | \`${{ steps.resolve_mesa.outputs.mesa_sha || 'N/A' }}\` |"
-            echo "| **Android NDK** | \`${{ env.RESOLVED_NDK_VER }}\` (API ${{ env.ANDROID_API_LEVEL }}) |"
-            echo "| **ISA / Tune** | \`-march=armv9.2-a+crc+crypto -mtune=cortex-a720\` |"
-            echo "| **Optimizasyonlar** | Release (-O3), NDEBUG, Thin LTO, Dead-Code Elimination (\`--gc-sections\`), lld -O2 |"
-            echo "| **Kaynak Saflığı** | **%100 Saf Upstream** (0 yama, 0 üçüncü taraf müdahalesi) |"
-            echo "| **Binary Doğrulama** | AArch64 + DYN + Yalnızca Bionic + ICD Entrypoint (\`vk_icdGetInstanceProcAddr\`) |"
-            echo "| **Paket Biçimi** | AdrenoTools Uyumlu (.adpkg.zip + meta.json) |"
-            echo "| **İş Akışı Durumu** | **${{ job.status }}** |"
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo "| **Mesa Kaynağı** | \`${{ steps.resolve_mesa.outputs.mesa_tag || 'Bilinmiyor' }}\` (\`${{ steps.resolve_mesa.outputs.mesa_sha || 'Bilinmiyor' }}\`) |"
+            echo "| **Android NDK** | \`${NDK_VERSION}\` (API \`${ANDROID_API_LEVEL}\`, minApi \`${ADPKG_MIN_API}\`) |"
+            echo "| **CPU ISA & Tune** | \`-march=armv9.2-a+crc+crypto -mtune=${CPU_TUNE}\` |"
+            echo "| **Derleme Optimizasyonu** | \`release (-O3) + NDEBUG + Thin LTO (${ENABLE_LTO}) + --gc-sections + -Wl,-O2 + -static-libstdc++\` |"
+            echo "| **Kaynak Saflığı** | **%100 Saf Upstream** (0 yama, 0 runtime env gömmesi) |"
+            echo "| **Binary Doğrulama** | \`ELF64 + AArch64 + DYN + Bionic Allowlist + vk_icdGetInstanceProcAddr\` |"
+            echo "| **Üretilen Artifact** | \`${{ steps.package_driver.outputs.artifact_basename || 'Üretilmedi' }}\` |"
+            echo "| **İş Durumu** | \`${{ job.status }}\` |"
+          } >> "${GITHUB_STEP_SUMMARY}"
