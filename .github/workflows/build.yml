@@ -1,5 +1,5 @@
 # =============================================================================
-# turnip-driver-a750 — %100 Resmî Mesa Upstream Turnip Derleme Hattı (v8 Master)
+# turnip-driver-a750 — %100 Resmî Mesa Upstream Turnip Derleme Hattı (v8.1 Master)
 # Hedef SoC / GPU  : Qualcomm Snapdragon 8 Gen 3 (SM8650) / Adreno 750
 # Sürücü Kimliği   : FD750 (a7xx_gen3), KGSL Chip-ID 0x43051401, Vulkan 1.4
 # Uyumlu Ortamlar  : Vita3K, Winlator (Bionic/Glibc), Citron, Eden, Sudachi,
@@ -15,24 +15,26 @@
 #     veya driconf profilleri ikili dosyaya gömülmez; sürücü saf upstream
 #     varsayılanlarıyla (Mesa 26.1+ C++ Autotuner dahil) çalışır.
 #  4. SVE2 / ARMv9 TUZAĞI VE EMÜLATÖR SİNYAL ÇÖKMESİ ÖNLEME:
-#     Clang'e '-march=armv9.2-a' verilmesi SVE/SVE2 vektörleşmesini zorunlu kılar.
-#     Winlator (Box64/FEX) ve Vita3K/Citron JIT sinyal işleyicileri SVE bağlamını
-#     kaydedemez; bu durum 'SIGILL' (Geçersiz Komut) veya 'SIGSEGV' çökmesine yol açar.
-#     Bu hatta evrensel kararlı taban olan '-march=armv8-a+crc+crypto' ve
-#     donanım zamanlaması için '-mtune=cortex-a720' kullanılır.
+#     Clang'e '-march=armv9.2-a' verildiğinde otomatik olarak SVE/SVE2 vektörleşmesi
+#     devreye girer. Winlator (Box64/FEX) ve Vita3K/Citron JIT sinyal işleyicileri
+#     SVE bağlamını kaydedemez; bu durum 'SIGILL' (Geçersiz Komut) veya 'SIGSEGV'
+#     çökmesine yol açar. Bu hatta evrensel kararlı taban olan '-march=armv8-a+crc+crypto'
+#     ve donanım zamanlaması için '-mtune=cortex-a720' kullanılır.
 #  5. DT_SONAME VE LIBADRENOTOOLS EŞLEŞMESİ (docs.mesa3d.org/android.html):
-#     Android libvulkan ve libadrenotools, sürücüyü 'vulkan.ad07xx.so' adıyla arar.
-#     Mesa Android dokümantasyonu uyarınca DT_SONAME 'vulkan.ad07xx.so' olarak
-#     bağlanır ve patchelf ile doğrulanır; meta.json içinde 'libraryName: vulkan.ad07xx.so'
-#     ve 'minApi: 27' ayarlanarak tüm emülatörlerde doğrudan çalışma sağlanır.
+#     Global link args içine '-Wl,-soname' yazılması stub kütüphanelerinin (liblog vb.)
+#     SONAME'lerini ezerek 'undefined symbol: __android_log_write' hatasına yol açar.
+#     Mesa Android dokümantasyonu standardı uyarınca DT_SONAME derleme sonrası
+#     doğrudan sürücü ikilisi üzerinde 'patchelf --set-soname vulkan.ad07xx.so' ile
+#     ayarlanır; meta.json içinde 'libraryName: vulkan.ad07xx.so' ve 'minApi: 27'
+#     tanımlanarak emülatörlerde tam uyumluluk sağlanır.
 #  6. 16KB SAYFA HİZALAMA GÜVENCESİ (Android 14 QPR / Android 15 Uyumluluğu):
 #     Modern çekirdeklerde 4KB hizalamalı ELF kütüphaneleri bionic linker tarafından
 #     reddedilir. Linker'a '-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384'
 #     verilerek PT_LOAD segmentleri 16KB uyumlu üretilir.
-#  7. SEMBOL SIZINTISI VE ÇAKIŞMA İZOLASYONU (-Wl,-Bsymbolic, --exclude-libs,ALL):
+#  7. SEMBOL SIZINTISI VE ÇAKIŞMA İZOLASYONU (-Wl,-Bsymbolic):
 #     Emülatörün kendi bellek yöneticisi ve C++ çalışma zamanı ile sürücünün
-#     statik libc++'ının çakışmaması için tüm iç semboller gizlenir; dışarıya
-#     yalnızca Android Vulkan HAL giriş sembolü 'HMI' aktarılır.
+#     statik libc++'ının çakışmaması için tüm iç semboller sürücü içine kilitlenir;
+#     dışarıya yalnızca Android Vulkan HAL giriş sembolü 'HMI' aktarılır.
 # =============================================================================
 
 name: Build Official Upstream Turnip (Snapdragon 8 Gen 3 / Adreno 750)
@@ -301,7 +303,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/android-ndk/android-ndk-${{ steps.init_params.outputs.ndk_version }}
-          key: official-android-ndk-linux-${{ steps.init_params.outputs.ndk_version }}-v5
+          key: official-android-ndk-linux-${{ steps.init_params.outputs.ndk_version }}-v6
 
       # -----------------------------------------------------------------------
       # 6) Resmî Android NDK İndir, Doğrula ve API 34 Hedefini Yapılandır
@@ -376,10 +378,10 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.ccache
-          key: ccache-turnip-a750-v8-${{ env.NDK_VERSION }}-api${{ steps.setup_ndk.outputs.android_api }}-${{ env.CPU_TUNE }}-lto-${{ env.ENABLE_LTO }}-${{ steps.resolve_mesa.outputs.mesa_tag }}-${{ github.run_id }}
+          key: ccache-turnip-a750-v81-${{ env.NDK_VERSION }}-api${{ steps.setup_ndk.outputs.android_api }}-${{ env.CPU_TUNE }}-lto-${{ env.ENABLE_LTO }}-${{ steps.resolve_mesa.outputs.mesa_tag }}-${{ github.run_id }}
           restore-keys: |
-            ccache-turnip-a750-v8-${{ env.NDK_VERSION }}-api${{ steps.setup_ndk.outputs.android_api }}-${{ env.CPU_TUNE }}-lto-${{ env.ENABLE_LTO }}-${{ steps.resolve_mesa.outputs.mesa_tag }}-
-            ccache-turnip-a750-v8-${{ env.NDK_VERSION }}-api${{ steps.setup_ndk.outputs.android_api }}-
+            ccache-turnip-a750-v81-${{ env.NDK_VERSION }}-api${{ steps.setup_ndk.outputs.android_api }}-${{ env.CPU_TUNE }}-lto-${{ env.ENABLE_LTO }}-${{ steps.resolve_mesa.outputs.mesa_tag }}-
+            ccache-turnip-a750-v81-${{ env.NDK_VERSION }}-api${{ steps.setup_ndk.outputs.android_api }}-
 
       # -----------------------------------------------------------------------
       # 8) Resmî Mesa Kaynak Kodu İndirme ve Saflık Denetimi
@@ -420,9 +422,9 @@ jobs:
           echo "::endgroup::"
 
       # -----------------------------------------------------------------------
-      # 9) Meson Cross-File ve Native-File Oluştur (Emülatör Kararlılık Mimarisi)
+      # 9) Meson Cross-File ve Native-File Oluştur (Temiz Linker & 16KB Sayfa Mimarisi)
       # -----------------------------------------------------------------------
-      - name: "9. Meson Cross-File Oluştur (Standart AArch64 Tabanı + 16KB Sayfa + DT_SONAME)"
+      - name: "9. Meson Cross-File Oluştur (Standart AArch64 Tabanı + 16KB Sayfa + Sembol İzolasyonu)"
         run: |
           set -euo pipefail
           echo "::group::Meson Cross-File ve Native-File Yapılandırması"
@@ -450,6 +452,12 @@ jobs:
           ccache --set-config=compression=true
           ccache --zero-stats
 
+          # KRİTİK LİNK DÜZELTMESİ:
+          # Global link args içine '-Wl,-soname' ASLA konulmamalıdır! Çünkü Meson bu argümanı
+          # Mesa'nın build ettiği tüm kütüphanelere (android_stub/liblog.so, libhardware.so vb.) geçirir.
+          # Birden çok stub kütüphanesi aynı SONAME'e sahip olduğunda ld.lld kütüphaneleri yinelenen sayıp
+          # liblog.so'yu atlar ve '__android_log_write' tanımsız sembol hatası fırlatır.
+          # DT_SONAME, resmî Mesa dokümanı standardı uyarınca derleme sonrası doğrudan patchelf ile ayarlanır.
           cat <<EOF > "${RUNNER_TEMP}/android-aarch64-sm8650.ini"
           [binaries]
           ar = '${NDK_TOOLCHAIN}/llvm-ar'
@@ -463,8 +471,8 @@ jobs:
           [built-in options]
           c_args = [${CPU_FLAGS}'-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-D__ANDROID__']
           cpp_args = [${CPU_FLAGS}'-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-D__ANDROID__']
-          c_link_args = ['-fuse-ld=lld', '-Wl,-soname,${TARGET_SONAME}', '-Wl,-z,max-page-size=16384', '-Wl,-z,common-page-size=16384', '-Wl,-Bsymbolic', '-Wl,--exclude-libs,ALL']
-          cpp_link_args = ['-fuse-ld=lld', '-static-libstdc++', '-Wl,-soname,${TARGET_SONAME}', '-Wl,-z,max-page-size=16384', '-Wl,-z,common-page-size=16384', '-Wl,-Bsymbolic', '-Wl,--exclude-libs,ALL']
+          c_link_args = ['-fuse-ld=lld', '-Wl,-z,max-page-size=16384', '-Wl,-z,common-page-size=16384']
+          cpp_link_args = ['-fuse-ld=lld', '-static-libstdc++', '-Wl,-z,max-page-size=16384', '-Wl,-z,common-page-size=16384', '-Wl,-Bsymbolic']
 
           [host_machine]
           system = 'android'
@@ -491,7 +499,7 @@ jobs:
           echo "::endgroup::"
 
       # -----------------------------------------------------------------------
-      # 10) Meson Setup + Ninja Install (RPATH Temizliği)
+      # 10) Meson Setup + Ninja Install (RPATH Temizliği, Sıfır Test Yükü)
       # -----------------------------------------------------------------------
       - name: "10. Meson ile Turnip (Freedreno KGSL) Yapılandır, Derle ve Kur (Install)"
         run: |
@@ -517,7 +525,7 @@ jobs:
 
           INSTALL_DIR="${RUNNER_TEMP}/mesa-install"
 
-          echo "::group::Meson Setup (Resmî Mesa Android NDK Standardı)"
+          echo "::group::Meson Setup (Resmî Mesa Android NDK Standardı + Tests=False)"
           if ! meson setup "${RUNNER_TEMP}/mesa-build" \
             --cross-file "${RUNNER_TEMP}/android-aarch64-sm8650.ini" \
             --native-file "${RUNNER_TEMP}/linux-native.ini" \
@@ -535,6 +543,7 @@ jobs:
             -Dvulkan-drivers=freedreno \
             -Dvulkan-beta=true \
             -Dfreedreno-kmds=kgsl \
+            -Dbuild-tests=false \
             -Degl=disabled \
             -Dgbm=disabled \
             -Dglx=disabled \
@@ -564,7 +573,7 @@ jobs:
           echo "::endgroup::"
 
       # -----------------------------------------------------------------------
-      # 11) Sıkı İkili (ELF / Bionic / 16KB Sayfa / DT_SONAME / HAL Sembol) Doğrulama Kapısı
+      # 11) Sıkı İkili (ELF / 16KB Sayfa / patchelf DT_SONAME / Vulkan HAL) Doğrulama Kapısı
       # -----------------------------------------------------------------------
       - name: "11. İkili Dosya (ELF / 16KB Sayfa / DT_SONAME / Vulkan HAL) Doğrulaması Yap"
         run: |
@@ -604,15 +613,18 @@ jobs:
             exit 1
           fi
 
-          # 3. DT_SONAME Kontrolü (docs.mesa3d.org/android.html ve libadrenotools standardı)
+          # 3. DT_SONAME Mühürleme (docs.mesa3d.org/android.html ve libadrenotools standardı)
+          echo "Sürücü ikilisine DT_SONAME '${TARGET_SONAME}' patchelf ile mühürleniyor..."
+          patchelf --set-soname "${TARGET_SONAME}" "${SO_PATH}"
+
           DYN_SECTION=$(readelf -d "${SO_PATH}")
           echo "${DYN_SECTION}"
 
           ACTUAL_SONAME=$(echo "${DYN_SECTION}" | awk -F'[][]' '/\(SONAME\)/ {print $2}')
-          echo "Mevcut DT_SONAME: ${ACTUAL_SONAME}"
+          echo "Doğrulanan DT_SONAME: ${ACTUAL_SONAME}"
           if [ "${ACTUAL_SONAME}" != "${TARGET_SONAME}" ]; then
-            echo "::warning::DT_SONAME '${ACTUAL_SONAME}', patchelf ile '${TARGET_SONAME}' olarak düzeltiliyor..."
-            patchelf --set-soname "${TARGET_SONAME}" "${SO_PATH}"
+            echo "::error::Doğrulama Hatası: DT_SONAME '${ACTUAL_SONAME}' beklenen '${TARGET_SONAME}' ile eşleşmiyor!"
+            exit 1
           fi
 
           # 4. Sıfır RPATH / RUNPATH Kontrolü
@@ -788,8 +800,8 @@ jobs:
             echo "| **Android NDK & API** | \`${NDK_VERSION}\` (Clang Bionic API \`${ANDROID_API_LEVEL}\`, Platform SDK \`${PLATFORM_SDK_VERSION}\`, minApi \`${ADPKG_MIN_API}\`) |"
             echo "| **CPU Komut Seti & Tune** | \`-march=armv8-a+crc+crypto\` (\`-mtune=${CPU_TUNE}\`) — SVE2 tuzakları kapalı, evrensel uyumlu |"
             echo "| **ELF Segment Hizalaması** | \`16384 bayt (16KB / 64KB)\` — Android 14/15 çekirdek uyumlu |"
-            echo "| **DT_SONAME & Kütüphane Adı** | \`${TARGET_SONAME}\` (\`libadrenotools\` & Bionic \`hw_get_module\` uyumlu) |"
-            echo "| **Sembol İzolasyonu** | \`-Wl,-Bsymbolic -Wl,--exclude-libs,ALL\` (yalnızca Vulkan \`HMI\` dışa açık) |"
+            echo "| **DT_SONAME & Kütüphane Adı** | \`${TARGET_SONAME}\` (\`libadrenotools\` & Bionic \`hw_get_module\` uyumlu, patchelf mühürlü) |"
+            echo "| **Sembol İzolasyonu** | \`-Wl,-Bsymbolic\` (yalnızca Vulkan \`HMI\` dışa açık) |"
             echo "| **Thin LTO** | \`${ENABLE_LTO}\` (Emülatör kararlılığı için varsayılan: \`false\`) |"
             echo "| **Kaynak Saflığı** | **%100 Saf Upstream** (0 yama, 0 runtime env gömmesi) |"
             echo "| **Doğrudan Kurulabilir Artifact** | \`${{ steps.package_driver.outputs.artifact_basename || 'Üretilmedi' }}.zip\` (İç içe zip yok — Vita3K / Winlator içine doğrudan kurulabilir) |"
