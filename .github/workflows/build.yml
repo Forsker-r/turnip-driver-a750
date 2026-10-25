@@ -88,8 +88,8 @@ env:
   MESA_REPO_URL: "https://gitlab.freedesktop.org/mesa/mesa.git"
   MESA_RELEASES_API: "https://gitlab.freedesktop.org/api/v4/projects/mesa%2Fmesa/releases?per_page=50"
   NDK_URL_BASE: "https://dl.google.com/android/repository"
-  # Resmî Google android-ndk-r26d-linux.zip SHA256 özeti:
-  NDK_R26D_SHA256: "41fb2fa69bdb9bb62d02fd616fd5f8f91dc0ec66b0f8c1d7e0c2155f91060246"
+  # Resmî Google dl.google.com android-ndk-r26d-linux.zip doğrulanmış SHA256 özeti:
+  NDK_R26D_SHA256: "eefeafe7ccf177de7cc57158da585e7af119bb7504a63604ad719e4b2a328b54"
   # --- Platform ve Hedef Sabitleri (Turnip md §5.2, §6.4, §12.2 B4) ----------
   # Not: NDK r26d üzerinde yamasız (android_ndk_compat.py olmadan) tam uyum için API 34:
   ANDROID_API_LEVEL: "34"
@@ -99,7 +99,8 @@ env:
 jobs:
   build-turnip-a750:
     name: "Turnip A750 (100% Pure Upstream Mesa + Official NDK)"
-    runs-on: ubuntu-latest
+    # Ubuntu 26.04 geçiş bildirimini (notice) önlemek ve deterministik ortam sağlamak için:
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
 
     steps:
@@ -135,13 +136,13 @@ jobs:
           echo "Thin LTO Durumu : ${ENABLE_LTO_IN}"
 
       # -----------------------------------------------------------------------
-      # 2) Depo Checkout (Yalnızca Workflow Deposu — Mesa Kaynağı Değildir)
+      # 2) Depo Checkout (Node.js 24 yerel uyumlu actions/checkout@v6)
       # -----------------------------------------------------------------------
       - name: "2. Depoyu Checkout Et"
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@v6
 
       # -----------------------------------------------------------------------
-      # 3) Derleme ve Doğrulama Bağımlılıklarını Kur
+      # 3) Derleme ve Doğrulama Bağımlılıklarını Kur (PEP 668 uyumlu)
       # -----------------------------------------------------------------------
       - name: "3. Derleme Bağımlılıklarını Kur (Ubuntu & Python Meson/Mako/PLY)"
         run: |
@@ -161,21 +162,26 @@ jobs:
             git \
             glslang-tools \
             jq \
+            meson \
             ninja-build \
             pkg-config \
             python3 \
+            python3-mako \
+            python3-packaging \
             python3-pip \
+            python3-ply \
             python3-setuptools \
             python3-wheel \
+            python3-yaml \
             unzip \
             xz-utils \
             zip \
             zstd
           echo "::endgroup::"
 
-          echo "::group::Python Derleme Araçları (Meson, Mako, PyYAML, PLY)"
-          python3 -m pip install --upgrade pip
-          python3 -m pip install "meson>=1.4.0" "mako>=1.2.0" "pyyaml" "ply" "packaging"
+          echo "::group::Python Derleme Araçları (Meson >= 1.4.0 Güncellemesi)"
+          python3 -m pip install --break-system-packages --upgrade "meson>=1.4.0" "mako>=1.2.0" "pyyaml" "ply" "packaging" \
+            || python3 -m pip install --upgrade "meson>=1.4.0" "mako>=1.2.0" "pyyaml" "ply" "packaging"
           echo "Meson            : $(meson --version)"
           echo "Ninja            : $(ninja --version)"
           echo "glslangValidator : $(glslangValidator --version | head -n1)"
@@ -265,14 +271,14 @@ jobs:
           echo "::endgroup::"
 
       # -----------------------------------------------------------------------
-      # 5) Resmî Android NDK Önbelleği ve Kurulumu (dl.google.com)
+      # 5) Resmî Android NDK Önbelleği ve Kurulumu (actions/cache@v5 - Node 24)
       # -----------------------------------------------------------------------
       - name: "5. Resmî Android NDK Önbelleğini Kontrol Et"
         id: cache_ndk
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache@v5
         with:
           path: ~/android-ndk/android-ndk-${{ env.NDK_VERSION }}
-          key: official-android-ndk-linux-${{ env.NDK_VERSION }}-v1
+          key: official-android-ndk-linux-${{ env.NDK_VERSION }}-v2
 
       - name: "6. Resmî Android NDK İndir, Doğrula ve Kur (dl.google.com)"
         run: |
@@ -314,10 +320,10 @@ jobs:
           echo "::endgroup::"
 
       # -----------------------------------------------------------------------
-      # 7) Derleyici Nesne Önbelleği (ccache) ve Meson PackageCache
+      # 7) Derleyici Nesne Önbelleği (ccache) — actions/cache@v5 (Node 24)
       # -----------------------------------------------------------------------
       - name: "7. Derleyici Önbelleğini (ccache) Yükle"
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache@v5
         with:
           path: ~/.ccache
           key: ccache-turnip-a750-${{ env.NDK_VERSION }}-${{ env.CPU_TUNE }}-lto-${{ env.ENABLE_LTO }}-${{ steps.resolve_mesa.outputs.mesa_tag }}-${{ github.run_id }}
@@ -608,10 +614,10 @@ jobs:
           echo "::endgroup::"
 
       # -----------------------------------------------------------------------
-      # 13) Artifact Yükleme
+      # 13) Artifact Yükleme (actions/upload-artifact@v6 - Node 24)
       # -----------------------------------------------------------------------
       - name: "13. Paketi GitHub Actions Artifact Olarak Yükle"
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ steps.package_driver.outputs.artifact_basename }}
           path: |
