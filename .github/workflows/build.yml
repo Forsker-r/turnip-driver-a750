@@ -99,8 +99,7 @@ env:
 jobs:
   build-turnip-a750:
     name: "Turnip A750 (100% Pure Upstream Mesa + Official NDK)"
-    # Ubuntu 26.04 geçiş bildirimini (notice) önlemek ve deterministik ortam sağlamak için:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 90
 
     steps:
