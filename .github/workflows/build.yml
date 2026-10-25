@@ -25,9 +25,10 @@
 #     Host pkg-config sızıntısını önleyen izole PKG_CONFIG_LIBDIR, resmî zlib wrap
 #     desteği ve kanıtlanmış Turnip/KGSL bayrak çekirdeği kullanılır.
 #  7. SIKI İKİLİ (ELF / BIONIC / SEMBOL) VE PAKET DOĞRULAMA KAPISI (Turnip md §5.2):
-#     AArch64 + DYN + Bionic allowlist (libc.so; glibc/libc++_shared/libexpat yasağı)
-#     + vk_icdGetInstanceProcAddr sembol kontrolü + masaüstü WSI sızıntı yasağı +
-#     AdrenoTools kök dizin meta.json şema doğrulaması.
+#     AArch64 + DYN + Bionic/Android-Stub allowlist (libc.so, libhardware.so, libcutils.so,
+#     libnativewindow.so, libsync.so, liblog.so, libm.so, libdl.so, libz.so;
+#     glibc/libc++_shared/libexpat yasağı) + vk_icdGetInstanceProcAddr sembol kontrolü +
+#     masaüstü WSI sızıntı yasağı + AdrenoTools kök dizin meta.json şema doğrulaması.
 # =============================================================================
 
 name: Build Official Upstream Turnip (Snapdragon 8 Gen 3 / Adreno 750)
@@ -66,7 +67,7 @@ on:
           - cortex-x4
       enable_lto:
         description: >-
-          Clang/LLD Thin LTO (-Db_lto=true -Db_lto_mode=thin) etkinleştir.
+          Clang/LLD Thin LTO (-Db_lto=true) etkinleştir.
           Varsayılan: true (tu_* ve ir3_* modülleri arası çapraz inline optimizasyonu).
         required: false
         default: true
@@ -420,12 +421,6 @@ jobs:
       # -----------------------------------------------------------------------
       # 9) Meson Cross-File Oluşturma
       #    docs.mesa3d.org/android.html + CPU/GPU md §2.1–§2.3 + Turnip md §6.4
-      #    Kritik Düzeltme:
-      #     - Host x86_64 pkg-config sızıntısını önlemek için izole PKG_CONFIG_LIBDIR
-      #     - '--start-no-unused-arguments' / '--end-no-unused-arguments' (resmî Mesa
-      #       Android dokümanı standardı: Meson C++ sanity check sırasında -static-libstdc++
-      #       uyarısını/hatasını önler)
-      #     - cpu = 'armv8' (Meson cross-file aarch64 standardı)
       # -----------------------------------------------------------------------
       - name: "9. Meson Cross-File Oluştur (SM8650 ARMv9.2-A + Resmî Mesa Android Standardı)"
         run: |
@@ -477,19 +472,12 @@ jobs:
 
       # -----------------------------------------------------------------------
       # 10) Meson Setup ve Ninja Derlemesi
-      #     Kritik Düzeltmeler:
-      #      1. '--wrap-mode=nofallback' KALDIRILDI: Mesa Android çapraz derlemesinde
-      #         kendi resmî subprojects/zlib.wrap sarmalayıcısına ihtiyaç duyar.
-      #      2. Yalnızca Mesa 26.x'te geçerli, kanıtlanmış Turnip/Android bayrakları
-      #         (docs.mesa3d.org/android.html + Turnip md §6.4) kullanıldı.
-      #      3. Hata durumunda meson-log.txt otomatik olarak konsola basılır.
       # -----------------------------------------------------------------------
       - name: "10. Meson ile Turnip (Freedreno KGSL) Yapılandır ve Derle"
         run: |
           set -euo pipefail
           cd "${RUNNER_TEMP}/mesa-src"
 
-          # Klonlama öncesi/sonrası çalışma ağacının 0 yama ile saf olduğunu doğrula
           if [ -n "$(git status --porcelain)" ]; then
             echo "::error::Derleme öncesi Mesa kaynak ağacında değişiklik tespit edildi!"
             git status --porcelain
@@ -548,8 +536,10 @@ jobs:
           echo "::endgroup::"
 
       # -----------------------------------------------------------------------
-      # 11) Sıkı İkili Dosya (ELF / Bionic Allowlist / Vulkan ICD Sembol) Kapısı
-      #     Turnip md §5.2 paket doğrulama kriterleri
+      # 11) Sıkı İkili Dosya (ELF / Bionic & Android-Stub Allowlist / Vulkan Sembol) Kapısı
+      #     Turnip md §5.2 & docs.mesa3d.org/android.html:
+      #     Android-stub kütüphaneleri: libhardware.so, libcutils.so, libnativewindow.so,
+      #     libsync.so, liblog.so, libandroid.so + Bionic: libc.so, libm.so, libdl.so, libz.so
       # -----------------------------------------------------------------------
       - name: "11. İkili Dosya (ELF / Bionic / Vulkan Sembol) Doğrulaması Yap"
         run: |
@@ -561,7 +551,7 @@ jobs:
             exit 1
           fi
 
-          # Strip garantisi (eğer derleme hedefi kurulum dışı çağrıldıysa llvm-strip ile sembolleri temizle)
+          # Strip garantisi (llvm-strip ile gereksiz sembolleri temizle)
           "${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded "${SO_PATH}" || true
 
           echo "Dosya Bilgisi : $(file -b "${SO_PATH}")"
@@ -597,9 +587,10 @@ jobs:
             exit 1
           fi
 
-          # Yalnızca izin verilen Android Bionic / NDK sistem kütüphanelerine bağlandığını doğrula
-          # (glibc libc.so.6, paylaşımlı libc++_shared.so, libstdc++.so.6 veya libexpat.so sızamaz)
-          ALLOWED_REGEX='^(libc\.so|libm\.so|libdl\.so|liblog\.so|libnativewindow\.so|libsync\.so|libandroid\.so|libz\.so)$'
+          # Yalnızca izin verilen Android Bionic ve Mesa android-stub sistem kütüphanelerine
+          # (docs.mesa3d.org/android.html: libc, libdl, liblog, libm, libcutils, libhardware,
+          # libnativewindow, libsync, libz, libandroid) bağlandığını doğrula:
+          ALLOWED_REGEX='^(libc\.so|libm\.so|libdl\.so|liblog\.so|libnativewindow\.so|libsync\.so|libandroid\.so|libhardware\.so|libcutils\.so|libz\.so)$'
           for lib in ${NEEDED_LIBS}; do
             if ! echo "${lib}" | grep -Eq "${ALLOWED_REGEX}"; then
               echo "::error::Doğrulama Hatası [5/6]: İzin verilmeyen harici kütüphane bağımlılığı: ${lib}"
