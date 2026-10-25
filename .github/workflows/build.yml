@@ -15,7 +15,7 @@
 #  4. OTOMATİK EN GÜNCEL NDK LTS & API SEVİYESİ TESPİTİ:
 #     Resmî Android NDK deposundan (github.com/android/ndk & dl.google.com) en güncel
 #     kararlı LTS sürümü (örn. r30) ve toolchain içindeki en yüksek API seviyesi
-#     (örn. API 35/36) dinamik olarak tespit edilir; SHA1/SHA256 bütünlüğü doğrulanır.
+#     (örn. API 35/36/37) dinamik olarak tespit edilir; SHA1/SHA256 bütünlüğü doğrulanır.
 #  5. HOMOJEN ARMv9.2-A + CORTEX-A720/X4 HEDEFLEME (CPU/GPU md §2.1, §2.2, §2.3):
 #     8 çekirdeğin tamamında (1× X4 + 5× A720 + 2× A520) ortak olan EL0 ARMv9.2-A
 #     komut seti (-march=armv9.2-a+crc+crypto; imli DotProd, FP16, BF16, I8MM,
@@ -24,11 +24,12 @@
 #  6. KANITLANMIŞ SAF MESON YAPILANDIRMASI (docs.mesa3d.org/android.html & Turnip md §6.4):
 #     Host pkg-config sızıntısını önleyen izole PKG_CONFIG_LIBDIR, resmî zlib wrap
 #     desteği ve kanıtlanmış Turnip/KGSL bayrak çekirdeği kullanılır.
-#  7. SIKI İKİLİ (ELF / BIONIC / SEMBOL) VE PAKET DOĞRULAMA KAPISI (Turnip md §5.2):
+#  7. SIKI İKİLİ (ELF / BIONIC / ANDROID HAL SEMBOL) VE PAKET DOĞRULAMA KAPISI (Turnip md §5.2):
 #     AArch64 + DYN + Bionic/Android-Stub allowlist (libc.so, libhardware.so, libcutils.so,
 #     libnativewindow.so, libsync.so, liblog.so, libm.so, libdl.so, libz.so;
-#     glibc/libc++_shared/libexpat yasağı) + vk_icdGetInstanceProcAddr sembol kontrolü +
-#     masaüstü WSI sızıntı yasağı + AdrenoTools kök dizin meta.json şema doğrulaması.
+#     glibc/libc++_shared/libexpat yasağı) + Android Vulkan HAL giriş noktası (HMI =
+#     HAL_MODULE_INFO_SYM, src/vulkan/vulkan-android.sym) veya vk_icdGetInstanceProcAddr
+#     sembol kontrolü + masaüstü WSI sızıntı yasağı + AdrenoTools kök dizin meta.json doğrulaması.
 # =============================================================================
 
 name: Build Official Upstream Turnip (Snapdragon 8 Gen 3 / Adreno 750)
@@ -155,10 +156,10 @@ jobs:
           echo "Thin LTO Durumu : ${ENABLE_LTO_IN}"
 
       # -----------------------------------------------------------------------
-      # 2) Depo Checkout (Node.js 24 yerel uyumlu actions/checkout@v6)
+      # 2) Depo Checkout (actions/checkout@v4)
       # -----------------------------------------------------------------------
       - name: "2. Depoyu Checkout Et"
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       # -----------------------------------------------------------------------
       # 3) Derleme ve Doğrulama Bağımlılıklarını Kur (PEP 668 uyumlu)
@@ -291,11 +292,11 @@ jobs:
           echo "::endgroup::"
 
       # -----------------------------------------------------------------------
-      # 5) Resmî Android NDK Önbelleği ve Kurulumu (actions/cache@v5 - Node 24)
+      # 5) Resmî Android NDK Önbelleği ve Kurulumu (actions/cache@v4)
       # -----------------------------------------------------------------------
       - name: "5. Resmî Android NDK Önbelleğini Kontrol Et"
         id: cache_ndk
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: ~/android-ndk/android-ndk-${{ steps.init_params.outputs.ndk_version }}
           key: official-android-ndk-linux-${{ steps.init_params.outputs.ndk_version }}-v3
@@ -358,7 +359,7 @@ jobs:
             exit 1
           fi
 
-          # Turnip md §6.4: platform-sdk-version en az 34..36 aralığında NDK'nın desteklediği en güncel API'ye ayarlanır
+          # Turnip md §6.4: platform-sdk-version NDK'nın desteklediği en güncel API'ye ayarlanır
           echo "Tespit Edilen En Güncel NDK Clang API Seviyesi: ${MAX_CLANG_API}"
           {
             echo "NDK_DIR=${NDK_DIR}"
@@ -368,10 +369,10 @@ jobs:
           echo "::endgroup::"
 
       # -----------------------------------------------------------------------
-      # 7) Derleyici Nesne Önbelleği (ccache) ve Meson Wrap PackageCache
+      # 7) Derleyici Nesne Önbelleği (ccache)
       # -----------------------------------------------------------------------
       - name: "7. Derleyici Önbelleğini (ccache) Yükle"
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: ~/.ccache
           key: ccache-turnip-a750-${{ env.NDK_VERSION }}-api${{ steps.setup_ndk.outputs.android_api }}-${{ env.CPU_TUNE }}-lto-${{ env.ENABLE_LTO }}-${{ steps.resolve_mesa.outputs.mesa_tag }}-${{ github.run_id }}
@@ -536,12 +537,14 @@ jobs:
           echo "::endgroup::"
 
       # -----------------------------------------------------------------------
-      # 11) Sıkı İkili Dosya (ELF / Bionic & Android-Stub Allowlist / Vulkan Sembol) Kapısı
-      #     Turnip md §5.2 & docs.mesa3d.org/android.html:
-      #     Android-stub kütüphaneleri: libhardware.so, libcutils.so, libnativewindow.so,
-      #     libsync.so, liblog.so, libandroid.so + Bionic: libc.so, libm.so, libdl.so, libz.so
+      # 11) Sıkı İkili Dosya (ELF / Bionic & Android-Stub Allowlist / Vulkan HAL Sembol) Kapısı
+      #     Turnip md §5.2 & docs.mesa3d.org/android.html & src/vulkan/vulkan-android.sym:
+      #     Android'de (-Dplatforms=android) Mesa Vulkan sürücüleri src/vulkan/vulkan-android.sym
+      #     veya src/vulkan/vulkan-icd-android-symbols.txt ile bağlanır ve dışa global olarak
+      #     yalnızca Android HWVulkan HAL giriş sembolü olan 'HMI' (HAL_MODULE_INFO_SYM)
+      #     sembolünü aktarır (vk_icdGetInstanceProcAddr masaüstü/Linux vulkan.sym içindir).
       # -----------------------------------------------------------------------
-      - name: "11. İkili Dosya (ELF / Bionic / Vulkan Sembol) Doğrulaması Yap"
+      - name: "11. İkili Dosya (ELF / Bionic / Android Vulkan HAL Sembol) Doğrulaması Yap"
         run: |
           set -euo pipefail
           echo "::group::Binary Doğrulama Kapısı (readelf & file)"
@@ -551,7 +554,7 @@ jobs:
             exit 1
           fi
 
-          # Strip garantisi (llvm-strip ile gereksiz sembolleri temizle)
+          # Strip garantisi (llvm-strip ile gereksiz sembolleri temizle; dinamik sembol tablosu .dynsym korunur)
           "${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded "${SO_PATH}" || true
 
           echo "Dosya Bilgisi : $(file -b "${SO_PATH}")"
@@ -598,10 +601,19 @@ jobs:
             fi
           done
 
-          # Vulkan ICD giriş noktası sembolü var mı ve masaüstü Linux WSI sembolleri sızmış mı kontrol et
+          # Android Vulkan HAL modülü ('HMI' = HAL_MODULE_INFO_SYM, struct hwvulkan_module_t;
+          # bkz. Mesa src/vulkan/vulkan-android.sym) veya standart ICD giriş noktası
+          # ('vk_icdGetInstanceProcAddr') dışa aktarılmış mı kontrol et:
           DYN_SYMS=$(readelf --dyn-syms -W "${SO_PATH}")
-          if ! echo "${DYN_SYMS}" | grep -qw "vk_icdGetInstanceProcAddr"; then
-            echo "::error::Doğrulama Hatası [6/6]: Vulkan ICD giriş sembolü (vk_icdGetInstanceProcAddr) bulunamadı!"
+          echo "Dışa Aktarılan GLOBAL DEFAULT Semboller (.dynsym):"
+          echo "${DYN_SYMS}" | awk '$4 != "NOTYPE" && $5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" {print "  - " $8 " (" $4 ")"}'
+
+          if echo "${DYN_SYMS}" | awk '$5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" {print $8}' | grep -Eq '^(HMI|HAL_MODULE_INFO_SYM|vk_icdGetInstanceProcAddr)$'; then
+            EXPORTED_ENTRY=$(echo "${DYN_SYMS}" | awk '$5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" {print $8}' | grep -E '^(HMI|HAL_MODULE_INFO_SYM|vk_icdGetInstanceProcAddr)$' | paste -sd, -)
+            echo "Doğrulanan Vulkan Giriş Sembolü [6/6]: ${EXPORTED_ENTRY} (Android HWVulkan HAL / ICD uyumlu)"
+          else
+            echo "::error::Doğrulama Hatası [6/6]: Android Vulkan HAL ('HMI') veya ICD ('vk_icdGetInstanceProcAddr') giriş sembolü bulunamadı!"
+            echo "${DYN_SYMS}"
             exit 1
           fi
 
@@ -693,10 +705,10 @@ jobs:
           echo "::endgroup::"
 
       # -----------------------------------------------------------------------
-      # 13) Artifact Yükleme (actions/upload-artifact@v6 - Node 24)
+      # 13) Artifact Yükleme (actions/upload-artifact@v4)
       # -----------------------------------------------------------------------
       - name: "13. Paketi GitHub Actions Artifact Olarak Yükle"
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package_driver.outputs.artifact_basename }}
           path: |
@@ -740,7 +752,7 @@ jobs:
             echo "| **CPU ISA & Tune** | \`-march=armv9.2-a+crc+crypto -mtune=${CPU_TUNE}\` |"
             echo "| **Derleme Optimizasyonu** | \`release (-O3) + NDEBUG + LTO (${ENABLE_LTO}) + --gc-sections + -Wl,-O2 + -static-libstdc++\` |"
             echo "| **Kaynak Saflığı** | **%100 Saf Upstream** (0 yama, 0 runtime env gömmesi) |"
-            echo "| **Binary Doğrulama** | \`ELF64 + AArch64 + DYN + Bionic Allowlist + vk_icdGetInstanceProcAddr\` |"
+            echo "| **Binary Doğrulama** | \`ELF64 + AArch64 + DYN + Bionic Allowlist + Android Vulkan HAL (HMI)\` |"
             echo "| **Üretilen Artifact** | \`${{ steps.package_driver.outputs.artifact_basename || 'Üretilmedi' }}\` |"
             echo "| **İş Durumu** | \`${{ job.status }}\` |"
           } >> "${GITHUB_STEP_SUMMARY}"
